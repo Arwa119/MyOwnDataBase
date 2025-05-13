@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iomanip> 
+#include "catalog.h"
 #include "input_handler.h"
 #include "row.h"
 #include "row_serialization.h"
@@ -240,6 +241,220 @@ int main() {
                 table->btree->printTree(table->btree->getRoot());
                 break;
             }
+            case CommandType::CREATE_DB: {
+    std::stringstream ss(input);
+    std::string create_keyword, db_keyword, db_name;
+    ss >> create_keyword >> db_keyword >> db_name;
+    
+    if (ss.fail() || create_keyword != "create" || db_keyword != "database") {
+        std::cout << "Syntax error. Usage: create database <database_name>\n";
+        break;
+    }
+    
+    // Check for extra input
+    std::string remaining;
+    if (ss >> remaining) {
+        std::cout << "Syntax error: Extra input after database name.\n";
+        break;
+    }
+    
+    DatabaseCatalog catalog("master"); // Use a default catalog
+    if (catalog.createDatabase(db_name)) {
+        std::cout << "Database '" << db_name << "' created successfully.\n";
+    } else {
+        std::cout << "Failed to create database '" << db_name << "'.\n";
+    }
+    break;
+}
+case CommandType::USE_DB: {
+    std::stringstream ss(input);
+    std::string use_keyword, db_name;
+    ss >> use_keyword >> db_name;
+    
+    if (ss.fail() || use_keyword != "use") {
+        std::cout << "Syntax error. Usage: use <database_name>\n";
+        break;
+    }
+    
+    // Check for extra input
+    std::string remaining;
+    if (ss >> remaining) {
+        std::cout << "Syntax error: Extra input after database name.\n";
+        break;
+    }
+    
+    // Close current table before switching databases
+    db_close(table);
+    table = nullptr;
+    
+    DatabaseCatalog catalog("master");
+    if (catalog.useDatabase(db_name)) {
+        // We would typically reopen tables here or set the current database
+        std::cout << "Now using database '" << db_name << "'.\n";
+    } else {
+        // If database switch fails, reopen the default table
+        table = db_open("mydb.db");
+    }
+    break;
+    
+}
+case CommandType::CREATE_TABLE: {
+    std::stringstream ss(input);
+    std::string create_keyword, table_keyword, table_name;
+    ss >> create_keyword >> table_keyword >> table_name;
+    
+    if (ss.fail() || create_keyword != "create" || table_keyword != "table") {
+        std::cout << "Syntax error. Usage: create table <table_name> (<column_name> <type>, ...)\n";
+        break;
+    }
+    
+    // Parse the column definitions
+    std::string columns_str;
+    std::getline(ss, columns_str);
+    
+    // Extracting column names and types from the string
+    std::vector<std::string> column_names;
+    std::vector<std::string> column_types;
+    
+    // Simple parsing logic for column definitions
+    size_t open_paren = columns_str.find('(');
+    size_t close_paren = columns_str.find_last_of(')');
+    
+    if (open_paren == std::string::npos || close_paren == std::string::npos) {
+        std::cout << "Syntax error: Missing parentheses in column definitions.\n";
+        break;
+    }
+    
+    std::string columns_content = columns_str.substr(open_paren + 1, close_paren - open_paren - 1);
+    std::stringstream columns_stream(columns_content);
+    std::string column_def;
+    
+    while (std::getline(columns_stream, column_def, ',')) {
+        // Trim whitespace
+        column_def.erase(0, column_def.find_first_not_of(" \t"));
+        column_def.erase(column_def.find_last_not_of(" \t") + 1);
+        
+        std::stringstream col_stream(column_def);
+        std::string col_name, col_type;
+        col_stream >> col_name >> col_type;
+        
+        if (col_stream.fail() || col_name.empty() || col_type.empty()) {
+            std::cout << "Syntax error in column definition: " << column_def << "\n";
+            break;
+        }
+        
+        column_names.push_back(col_name);
+        column_types.push_back(col_type);
+    }
+    
+    // If we have valid column definitions, create the table
+    if (!column_names.empty() && column_names.size() == column_types.size()) {
+        DatabaseCatalog catalog("master"); // or use the current database
+        if (catalog.createTable(table_name, column_names, column_types)) {
+            std::cout << "Table '" << table_name << "' created successfully.\n";
+        } else {
+            std::cout << "Failed to create table '" << table_name << "'.\n";
+        }
+    } else {
+        std::cout << "Error: No valid column definitions provided.\n";
+    }
+    break;
+}
+case CommandType::ALTER_TABLE: {
+    std::stringstream ss(input);
+    std::string alter_keyword, table_keyword, table_name, rename_keyword, to_keyword, new_table_name;
+    ss >> alter_keyword >> table_keyword >> table_name >> rename_keyword >> to_keyword >> new_table_name;
+    
+    if (ss.fail() || alter_keyword != "alter" || table_keyword != "table" || 
+        rename_keyword != "rename" || to_keyword != "to") {
+        std::cout << "Syntax error. Usage: alter table <table_name> rename to <new_table_name>\n";
+        break;
+    }
+    
+    // Check for extra input
+    std::string remaining;
+    if (ss >> remaining) {
+        std::cout << "Syntax error: Extra input after new table name.\n";
+        break;
+    }
+    
+    DatabaseCatalog catalog("master"); // or use the current database
+    if (catalog.alterTableName(table_name, new_table_name)) {
+        std::cout << "Table renamed from '" << table_name << "' to '" << new_table_name << "' successfully.\n";
+    } else {
+        std::cout << "Failed to rename table from '" << table_name << "' to '" << new_table_name << "'.\n";
+    }
+    break;
+}
+
+case CommandType::SHOW_TABLES: {
+    std::stringstream ss(input);
+    std::string show_keyword, tables_keyword;
+    ss >> show_keyword >> tables_keyword;
+    
+    if (ss.fail() || show_keyword != "show" || tables_keyword != "tables") {
+        std::cout << "Syntax error. Usage: show tables\n";
+        break;
+    }
+    
+    // Check for extra input
+    std::string remaining;
+    if (ss >> remaining) {
+        std::cout << "Syntax error: Extra input after 'tables'.\n";
+        break;
+    }
+    
+    DatabaseCatalog catalog("master"); // or use the current database
+    std::vector<std::string> tables = catalog.listTables();
+    
+    if (tables.empty()) {
+        std::cout << "No tables found in the current database.\n";
+    } else {
+        std::cout << "Tables in the current database:\n";
+        for (const auto& table_name : tables) {
+            std::cout << "- " << table_name << "\n";
+        }
+    }
+    break;
+}
+case CommandType::DROP_TABLE: {
+    std::stringstream ss(input);
+    std::string drop_keyword, table_keyword, table_name;
+    ss >> drop_keyword >> table_keyword >> table_name;
+    
+    if (ss.fail() || drop_keyword != "drop" || table_keyword != "table") {
+        std::cout << "Syntax error. Usage: drop table <table_name>\n";
+        break;
+    }
+    
+    // Check for extra input
+    std::string remaining;
+    if (ss >> remaining) {
+        std::cout << "Syntax error: Extra input after table name.\n";
+        break;
+    }
+    
+    DatabaseCatalog catalog("master"); // or use the current database
+    
+    // If the table we're dropping is the current open table, close it first
+    if (table != nullptr && catalog.getTableName(table) == table_name) {
+        db_close(table);
+        table = nullptr;
+    }
+
+    if (catalog.dropTable(table_name)) {
+        std::cout << "Table '" << table_name << "' dropped successfully.\n";
+    } else {
+        std::cout << "Failed to drop table '" << table_name << "'.\n";
+    }
+
+    // If we closed our working table, reopen the default one
+    if (table == nullptr) {
+        table = db_open("mydb.db");
+    }
+    break;
+}
+   
             case CommandType::UNKOWN:
             default:
                 std::cout << "Unrecognized command: " << input << "\n";

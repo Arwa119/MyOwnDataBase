@@ -11,6 +11,12 @@ enum class CommandType{
     SELECT,
     DELETE,
     BTREE_CMD,
+    CREATE_DB,
+    USE_DB,
+    CREATE_TABLE,
+    ALTER_TABLE,
+    SHOW_TABLES,
+    DROP_TABLE,
     UNKOWN
 };
 
@@ -36,6 +42,25 @@ CommandType parse_command(const std::string& input){
     }
     else if(trimmed_input == ".btree"){
         return CommandType::BTREE_CMD;
+    }
+    ////db commands
+    else if (trimmed_input .find("create database") == 0) {
+        return CommandType::CREATE_DB;
+    }
+    else if (trimmed_input .find("use") == 0) {
+        return CommandType::USE_DB;
+    }
+    else if (trimmed_input .find("create table") == 0) {
+        return CommandType::CREATE_TABLE;
+    }
+    else if (trimmed_input .find("alter table") == 0) {
+        return CommandType::ALTER_TABLE;
+    }
+    else if (trimmed_input .find("show tables") == 0) {
+        return CommandType::SHOW_TABLES;
+    }
+    else if (trimmed_input.find("drop table") == 0) {
+        return CommandType::DROP_TABLE;
     }
     else{
         return CommandType::UNKOWN;
