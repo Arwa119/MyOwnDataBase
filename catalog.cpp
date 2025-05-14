@@ -168,14 +168,16 @@ bool DatabaseCatalog::useDatabase(const std::string& dbName) {
     return true;
 }
 bool DatabaseCatalog::loadCatalog() {
-    std::ifstream file(getCatalogFilePath());
-    if (!file.is_open()) {
-        // First-time use of database - create empty catalog
-        databases.push_back(currentDb);
-        saveCatalog();
-        return true;
-    }
+
+ std::string catalogPath = getCatalogFilePath();
     
+    // If catalog file doesn't exist, initialize fresh database
+    if (!std::ifstream(catalogPath)) {
+        tables.clear();
+        return true; // Fresh database with no tables
+    }
+    std::ifstream file(getCatalogFilePath());
+  
     std::string line;
     std::string section = "";
     
@@ -231,6 +233,8 @@ bool DatabaseCatalog::loadCatalog() {
     return true;
 }
 
+
+
 bool DatabaseCatalog::dropTable(const std::string& tableName) {
     // Find the table in our metadata
     auto it = std::find_if(tables.begin(), tables.end(), 
@@ -268,9 +272,9 @@ bool DatabaseCatalog::dropTable(const std::string& tableName) {
     return true;
 }
 
-bool DatabaseCatalog::createTable(const std::string& tableName,
-                                 const std::vector<std::string>& columnNames,
-                                 const std::vector<std::string>& columnTypes) {
+// Add this implementation after your existing createTable method
+bool DatabaseCatalog::createTable(const std::string& dbName, const std::string& tableName, 
+                                 const std::string& tablePath, const std::string& schema) {
     // Check if table already exists
     for (const auto& table : tables) {
         if (table.tableName == tableName) {
@@ -279,10 +283,29 @@ bool DatabaseCatalog::createTable(const std::string& tableName,
         }
     }
     
+    // Parse schema string to extract column names and types
+    std::vector<std::string> columnNames;
+    std::vector<std::string> columnTypes;
+    
+    if (!schema.empty()) {
+        std::string token;
+        std::istringstream schemaStream(schema);
+        
+        while (std::getline(schemaStream, token, ',')) {
+            size_t pos = token.find(':');
+            if (pos != std::string::npos) {
+                std::string name = token.substr(0, pos);
+                std::string type = token.substr(pos + 1);
+                columnNames.push_back(name);
+                columnTypes.push_back(type);
+            }
+        }
+    }
+    
     // Create table metadata
     TableMetadata metadata;
     metadata.tableName = tableName;
-    metadata.filename = getTablePath(tableName);
+    metadata.filename = tablePath; // Use the provided path
     metadata.columnNames = columnNames;
     metadata.columnTypes = columnTypes;
     
@@ -303,6 +326,46 @@ bool renameFile(const std::string& oldPath, const std::string& newPath) {
     #else
         return rename(oldPath.c_str(), newPath.c_str()) == 0;
     #endif
+}
+
+std::string DatabaseCatalog::getCurrentDatabase() const {
+    return currentDb;
+}
+bool DatabaseCatalog::dropDatabase(const std::string& dbName) {
+    // Check if database exists
+    auto it = std::find(databases.begin(), databases.end(), dbName);
+    if (it == databases.end()) {
+        std::cout << "Error: Database '" << dbName << "' does not exist.\n";
+        return false;
+    }
+    
+    // Can't drop current database
+    if (currentDb == dbName) {
+        std::cout << "Error: Cannot drop currently selected database.\n";
+        return false;
+    }
+    
+    // Get database path
+    std::string dbPath = getDatabasePath(dbName);
+    
+    // Remove directory and all contents
+    #ifdef _WIN32
+        std::string cmd = "rmdir /s /q \"" + dbPath + "\"";
+    #else
+        std::string cmd = "rm -rf \"" + dbPath + "\"";
+    #endif
+    
+    if (system(cmd.c_str()) != 0) {
+        std::cout << "Error: Failed to remove database directory.\n";
+        return false;
+    }
+    
+    // Remove from databases list
+    databases.erase(it);
+    
+    // Save catalog
+    saveCatalog();
+    return true;
 }
 bool DatabaseCatalog::alterTableName(const std::string& oldName, const std::string& newName) {
     // Find the table
@@ -359,18 +422,3 @@ std::vector<std::string> DatabaseCatalog::listTables() {
     }
     return tableNames;
 }
-
-// Path helpers
-
-// std::string DatabaseCatalog::getTablePath(const std::string& tableName) {
-//     return getDatabasePath(currentDb) + tableName + ".db";
-// }
-
-// std::string DatabaseCatalog::getCatalogFilePath() {
-//     return getDatabasePath(currentDb) + "catalog.meta";
-// }
-
-// Save catalog metadata to file
-
-
-// More methods would be implemented here...

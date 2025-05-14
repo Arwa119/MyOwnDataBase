@@ -4,9 +4,9 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <fstream>
 #include <algorithm>
-#include <cstring>
-#include <iomanip> 
+#include <cstring> 
 #include "catalog.h"
 #include "input_handler.h"
 #include "row.h"
@@ -15,7 +15,62 @@
 #include "table.h"
 #include "btree.h"
 
+// Add this function definition OUTSIDE of the main() function, at the top of your file
+void showTables(const std::string& currentDatabase) {
+    // Open the catalog file
+    std::ifstream catalog("./databases/" + currentDatabase + "/catalog.db");
+
+    if (!catalog.is_open()) {
+        std::cout << "Error: Could not open catalog file." << std::endl;
+        return;
+    }
+    
+    std::string line;
+    bool inTablesSection = false;
+    std::vector<std::string> tableNames;
+    
+    // Find the TABLES section and read entries
+    while (std::getline(catalog, line)) {
+        if (line == "TABLES") {
+            inTablesSection = true;
+            continue;
+        }
+        
+        if (inTablesSection) {
+            // Parse the line (format: db:tableName:path:schema)
+            std::istringstream iss(line);
+            std::string dbName, tableName, rest;
+            
+            // Extract the database name and table name
+            std::getline(iss, dbName, ':');
+            std::getline(iss, tableName, ':');
+            
+            // Only show tables for the current database
+            if (dbName == currentDatabase) {
+                tableNames.push_back(tableName);
+            }
+        }
+    }
+    
+    // Display tables
+    if (tableNames.empty()) {
+        std::cout << "No tables found in database '" << currentDatabase << "'" << std::endl;
+    } else {
+        std::cout << "Tables in database '" << currentDatabase << "':" << std::endl;
+        for (const auto& name : tableNames) {
+            std::cout << "  - " << name << std::endl;
+        }
+    }
+    
+    catalog.close();
+}
+
+
+
+
+
 int main() {
+    std::string currentDatabase = "master"; // Default database
     // Open or create the database table
     Table* table = db_open("mydb.db");
 
@@ -303,60 +358,97 @@ case CommandType::CREATE_TABLE: {
     std::string create_keyword, table_keyword, table_name;
     ss >> create_keyword >> table_keyword >> table_name;
     
-    if (ss.fail() || create_keyword != "create" || table_keyword != "table") {
-        std::cout << "Syntax error. Usage: create table <table_name> (<column_name> <type>, ...)\n";
+    if (ss.fail() || create_keyword != "create" || table_keyword != "table" || table_name.empty()) {
+        std::cout << "Syntax error. Usage: create table <table_name> (column1 datatype, column2 datatype, ...)\n";
         break;
     }
     
-    // Parse the column definitions
+    // Parse column definitions: "create table students (id int, name varchar, email varchar)"
     std::string columns_str;
-    std::getline(ss, columns_str);
+    std::getline(ss, columns_str); // Get the rest of the line for column definitions
     
-    // Extracting column names and types from the string
-    std::vector<std::string> column_names;
-    std::vector<std::string> column_types;
-    
-    // Simple parsing logic for column definitions
+    // Extract column definitions from between parentheses
     size_t open_paren = columns_str.find('(');
     size_t close_paren = columns_str.find_last_of(')');
     
-    if (open_paren == std::string::npos || close_paren == std::string::npos) {
-        std::cout << "Syntax error: Missing parentheses in column definitions.\n";
+    if (open_paren == std::string::npos || close_paren == std::string::npos || open_paren >= close_paren) {
+        std::cout << "Syntax error. Column definitions must be enclosed in parentheses.\n";
+        std::cout << "Usage: create table <table_name> (column1 datatype, column2 datatype, ...)\n";
         break;
     }
     
-    std::string columns_content = columns_str.substr(open_paren + 1, close_paren - open_paren - 1);
-    std::stringstream columns_stream(columns_content);
-    std::string column_def;
+    // Extract the column definitions string
+    std::string columns_def = columns_str.substr(open_paren + 1, close_paren - open_paren - 1);
     
-    while (std::getline(columns_stream, column_def, ',')) {
-        // Trim whitespace
-        column_def.erase(0, column_def.find_first_not_of(" \t"));
-        column_def.erase(column_def.find_last_not_of(" \t") + 1);
+    // Parse individual column definitions (name:type pairs)
+    std::vector<std::pair<std::string, std::string>> column_definitions;
+    std::stringstream col_stream(columns_def);
+    std::string col_def;
+    
+    while (std::getline(col_stream, col_def, ',')) {
+        // Trim leading/trailing spaces
+        col_def.erase(0, col_def.find_first_not_of(" \t"));
+        col_def.erase(col_def.find_last_not_of(" \t") + 1);
         
-        std::stringstream col_stream(column_def);
+        // Split by space to get column name and type
+        std::stringstream col_part_stream(col_def);
         std::string col_name, col_type;
-        col_stream >> col_name >> col_type;
+        col_part_stream >> col_name >> col_type;
         
-        if (col_stream.fail() || col_name.empty() || col_type.empty()) {
-            std::cout << "Syntax error in column definition: " << column_def << "\n";
+        if (col_name.empty() || col_type.empty()) {
+            std::cout << "Invalid column definition: '" << col_def << "'. Format should be 'name type'.\n";
             break;
         }
         
-        column_names.push_back(col_name);
-        column_types.push_back(col_type);
+        // Convert to uppercase for consistency
+        std::transform(col_type.begin(), col_type.end(), col_type.begin(), ::toupper);
+        
+        // Validate column type
+        if (col_type != "INT" && col_type != "VARCHAR" && col_type != "FLOAT" && col_type != "TEXT") {
+            std::cout << "Unsupported data type: " << col_type << ". Supported types: INT, VARCHAR, FLOAT, TEXT\n";
+            break;
+        }
+        
+        column_definitions.push_back({col_name, col_type});
     }
     
-    // If we have valid column definitions, create the table
-    if (!column_names.empty() && column_names.size() == column_types.size()) {
-        DatabaseCatalog catalog("master"); // or use the current database
-        if (catalog.createTable(table_name, column_names, column_types)) {
-            std::cout << "Table '" << table_name << "' created successfully.\n";
-        } else {
-            std::cout << "Failed to create table '" << table_name << "'.\n";
+    // Build the schema string for catalog (format: column_name:TYPE,...)
+    std::string schema;
+    for (size_t i = 0; i < column_definitions.size(); ++i) {
+        schema += column_definitions[i].first + ":" + column_definitions[i].second;
+        if (i < column_definitions.size() - 1) {
+            schema += ",";
         }
+    }
+    
+    // Create the table file and add to catalog
+    DatabaseCatalog catalog("master");
+    std::string currentDB = currentDatabase;
+    
+    // 1. Create the directory for the database if it doesn't exist
+    std::string dbPath = "./databases/" + currentDB;
+//     bool success =create_directories(dbPath); // Creates all parent dirs if needed
+// if (!success) {
+//     std::cerr << "Failed to create directory: " << dbPath << std::endl;
+// }
+    // 2. Determine the table file path
+    std::string tablePath = dbPath + "/" + table_name + ".db";
+    
+    // 3. Add entry to catalog
+    if (catalog.createTable(currentDB, table_name, tablePath ,dbPath)) {
+        // 4. Create the physical fil   e for the table
+        std::ofstream tableFile(tablePath, std::ios::binary);
+        if (!tableFile) {
+            std::cout << "Error: Could not create table file at " << tablePath << "\n";
+            break;
+        }
+        
+        // Initialize the table file with appropriate header
+        tableFile.close();
+        
+        std::cout << "Table '" << table_name << "' created successfully.\n";
     } else {
-        std::cout << "Error: No valid column definitions provided.\n";
+        std::cout << "Error creating table '" << table_name << "'.\n";
     }
     break;
 }
@@ -387,6 +479,8 @@ case CommandType::ALTER_TABLE: {
     break;
 }
 
+
+// Inside main(), replace your SHOW_TABLES case with:
 case CommandType::SHOW_TABLES: {
     std::stringstream ss(input);
     std::string show_keyword, tables_keyword;
@@ -404,19 +498,44 @@ case CommandType::SHOW_TABLES: {
         break;
     }
     
-    DatabaseCatalog catalog("master"); // or use the current database
-    std::vector<std::string> tables = catalog.listTables();
-    
-    if (tables.empty()) {
-        std::cout << "No tables found in the current database.\n";
-    } else {
-        std::cout << "Tables in the current database:\n";
-        for (const auto& table_name : tables) {
-            std::cout << "- " << table_name << "\n";
-        }
-    }
+    // Call the showTables function 
+    DatabaseCatalog catalog("master");
+    std::string currentDatabase  = catalog.getCurrentDatabase(); // You need this function
+    showTables( currentDatabase );
+
     break;
 }
+
+// case CommandType::SHOW_TABLES: {
+//     std::stringstream ss(input);
+//     std::string show_keyword, tables_keyword;
+//     ss >> show_keyword >> tables_keyword;
+    
+//     if (ss.fail() || show_keyword != "show" || tables_keyword != "tables") {
+//         std::cout << "Syntax error. Usage: show tables\n";
+//         break;
+//     }
+    
+//     // Check for extra input
+//     std::string remaining;
+//     if (ss >> remaining) {
+//         std::cout << "Syntax error: Extra input after 'tables'.\n";
+//         break;
+//     }
+    
+//     DatabaseCatalog catalog("master"); // or use the current database
+//     std::vector<std::string> tables = catalog.listTables();
+    
+//     if (tables.empty()) {
+//         std::cout << "No tables found in the current database.\n";
+//     } else {
+//         std::cout << "Tables in the current database:\n";
+//         for (const auto& table_name : tables) {
+//             std::cout << "- " << table_name << "\n";
+//         }
+//     }
+//     break;
+// }
 case CommandType::DROP_TABLE: {
     std::stringstream ss(input);
     std::string drop_keyword, table_keyword, table_name;

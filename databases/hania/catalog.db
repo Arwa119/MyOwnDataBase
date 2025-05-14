@@ -34,8 +34,7 @@ master
 master
 ab
 hania
-arshad
-khadija
+hania
 TABLES
 master:students:./databases/master/students.db:id:INT,name:VARCHAR,email:VARCHAR
 master:books:./databases/master/books.db:id:INT,name:VARCHAR
@@ -43,9 +42,3 @@ master:users:./databases/master/users.db:id:INT,name:VARCHAR,email:VARCHAR
 master:love:./databases/master/love.db:INT:id
 ab:employees:./databases/ab/employees.db:id:INT,name:VARCHAR,salary:FLOAT
 ab:employees:./databases/ab/employees.db:id:INT,name:VARCHAR,salary:FLOAT
-students
-./databases/master/students.db
-INT:Id
-bachay
-./databases/master/bachay.db
-
