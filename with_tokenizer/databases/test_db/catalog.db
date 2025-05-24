@@ -1,0 +1,12 @@
+DATABASES
+master
+testdb
+test
+test_db
+TABLES
+users
+./databases/test_db/users.db
+id:int,name:varchar,email:varchar
+complex_test
+./databases/test_db/complex_test.db
+id:int,name:varchar,email:varchar
