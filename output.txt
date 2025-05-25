@@ -1,0 +1,94 @@
+master > Database 'testdb' created successfully.
+master > Using database: testdb
+Now using database 'testdb'.
+testdb > Opening file: ./databases/testdb/users.db, length: 0 bytes
+Table created: users
+Table 'users' created and opened successfully.
+testdb.users > Row inserted.
+testdb.users > Row inserted.
+testdb.users > Retrieving all rows:
+(1, Alice, alice@example.com)
+(2, Bob, bob@example.com)
+testdb.users > Row with ID 1 deleted.
+testdb.users > Retrieving all rows:
+(2, Bob, bob@example.com)
+testdb.users > Row inserted.
+testdb.users > Updated row: id=2, row_num=1
+Row with ID 2 updated.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+testdb.users > Row inserted.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+testdb.users > Tables in the current database:
+- users
+testdb.users > Transaction 1 started.
+testdb.users > Row inserted.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+(4, Eve, eve@example.com)
+testdb.users > Transaction 2 started.
+testdb.users > Transaction 2 waiting for shared lock on table 'users'.
+testdb.users > Transaction 1 committed successfully.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+(4, Eve, eve@example.com)
+testdb.users > Transaction 2 committed successfully.
+testdb.users > Transaction 1 started.
+testdb.users > Row inserted.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+(4, Eve, eve@example.com)
+(5, Frank, frank@example.com)
+testdb.users > Transaction 1 rolled back successfully.
+testdb.users > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+(4, Eve, eve@example.com)
+testdb.users > Transaction 3 started.
+testdb.users > Row inserted.
+testdb.users > Transaction 4 started.
+testdb.users > Transaction 4 waiting for exclusive lock on table 'users'.
+testdb.users > Row with ID 7 not found or deleted.
+testdb.users > Transaction 4 waiting for exclusive lock on table 'users'.
+testdb.users > Transaction 3 committed successfully.
+testdb.users > Closed table
+Table renamed: users -> people
+Table renamed from 'users' to 'people' successfully.
+testdb > Opening file: ./databases/testdb/people.db, length: 4096 bytes
+Now using table 'people' in database 'testdb'.
+testdb.people > Retrieving all rows:
+(2, David,, david@example.com)
+(3, Charlie, charlie@example.com)
+(1, AliceNew, alice.new@example.com)
+(4, Eve, eve@example.com)
+(6, Grace, grace@example.com)
+testdb.people > Closed table
+Table 'people' dropped successfully.
+testdb > No tables found in the current database.
+testdb > Opening file: ./databases/testdb/employees.db, length: 0 bytes
+Table created: employees
+Table 'employees' created and opened successfully.
+testdb.employees > Closed table
+Opening file: ./databases/testdb/employees.db, length: 4096 bytes
+Now using table 'employees' in database 'testdb'.
+testdb.employees > Row inserted.
+testdb.employees > Retrieving all rows:
+(1, John, john@example.com)
+testdb.employees > Error: Duplicate ID. Row with ID 1 already exists.
+testdb.employees > Found row with ID 1:
+(1, John, john@example.com)
+testdb.employees > Row with ID 999 not found.
+testdb.employees > Row with ID 999 not found or deleted.
+testdb.employees > Closed table
+Exiting...
