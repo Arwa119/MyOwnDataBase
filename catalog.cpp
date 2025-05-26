@@ -1,24 +1,28 @@
-// Add these headers at the top of your file instead of <filesystem>
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 #endif
 #include <fstream>
 #include <iostream>
-#include <sstream> // Added to fix the issue with std::istringstream
+#include <sstream>
+#include <algorithm>
+#include <string>
+#include <stdexcept>
 #include "catalog.h"
+#include "table.h"
+
 using namespace std;
 
-// Add this function to your DatabaseCatalog class or as a standalone function
+// Helper function to create directories
 bool create_directories(const std::string& path) {
     std::string current = "";
     std::string delimiter = "/";
     
     #ifdef _WIN32
-        // Also handle Windows backslashes
         std::string path_copy = path;
         std::replace(path_copy.begin(), path_copy.end(), '\\', '/');
         std::string dir_path = path_copy;
@@ -55,12 +59,185 @@ bool create_directories(const std::string& path) {
     
     return result;
 }
+
+// Helper function to rename files
+bool renameFile(const std::string& oldPath, const std::string& newPath) {
+    #ifdef _WIN32
+        return MoveFileA(oldPath.c_str(), newPath.c_str()) != 0;
+    #else
+        return rename(oldPath.c_str(), newPath.c_str()) == 0;
+    #endif
+}
+
+// Helper function to remove a directory and its contents
+bool remove_directory(const std::string& path) {
+#ifdef _WIN32
+    // Windows: Use SHFileOperation for recursive deletion
+    SHFILEOPSTRUCTA op = {0};
+    op.wFunc = FO_DELETE;
+    // Double-null terminate the path
+    std::string doubleNullTermPath = path + '\0';
+    op.pFrom = doubleNullTermPath.c_str();
+    op.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI; // Replaced FOF_NO_UI
+    int result = SHFileOperationA(&op);
+    return result == 0;
+#else
+    // Unix: Recursive deletion using dirent
+    DIR* dir = opendir(path.c_str());
+    if (!dir) {
+        return errno == ENOENT; // Directory doesn't exist, consider it success
+    }
+
+    bool success = true;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        std::string fullPath = path + "/" + entry->d_name;
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (!remove_directory(fullPath)) {
+                    success = false;
+                }
+            } else {
+                if (unlink(fullPath.c_str()) != 0) {
+                    success = false;
+                }
+            }
+        }
+    }
+    closedir(dir);
+    
+    if (success && rmdir(path.c_str()) != 0) {
+        success = false;
+    }
+    return success;
+#endif
+}
+
 DatabaseCatalog::DatabaseCatalog(const std::string& dbName) : currentDb(dbName) {
-    // Create the database directory if it doesn't exist
     create_directories(getDatabasePath(dbName));
-    // Load catalog metadata
     loadCatalog();
 }
+
+DatabaseCatalog::~DatabaseCatalog() {
+    for (auto& pair : openTables) {
+        closeTable(pair.second);
+    }
+    saveCatalog();
+}
+
+bool DatabaseCatalog::createDatabase(const std::string& dbName) {
+    std::string dbPath = getDatabasePath(dbName);
+
+    if (std::find(databases.begin(), databases.end(), dbName) != databases.end()) {
+        std::cout << "Error: Database '" << dbName << "' already exists.\n";
+        return false;
+    }
+
+    if (!create_directories(dbPath)) {
+        std::cout << "Error: Could not create database directory.\n";
+        return false;
+    }
+
+    databases.push_back(dbName);
+
+    if (!saveCatalog()) {
+        std::cout << "Error: Could not save catalog metadata.\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseCatalog::dropDatabase(const std::string& dbName) {
+    if (dbName == "master") {
+        std::cout << "Error: Cannot drop the master database.\n";
+        return false;
+    }
+
+    auto it = std::find(databases.begin(), databases.end(), dbName);
+    if (it == databases.end()) {
+        std::cout << "Error: Database '" << dbName << "' does not exist.\n";
+        return false;
+    }
+
+    // Close all open tables in the database to be dropped
+    std::string tempDb = currentDb;
+    if (currentDb != dbName) {
+        useDatabase(dbName); // Temporarily switch to load the database's tables
+    }
+
+    for (auto& pair : openTables) {
+        closeTable(pair.second);
+    }
+    openTables.clear();
+    tables.clear();
+
+    // Delete the database directory and its contents
+    std::string dbPath = getDatabasePath(dbName);
+    try {
+        if (!remove_directory(dbPath)) {
+            std::cerr << "Error: Could not delete database directory '" << dbPath << "'.\n";
+            if (currentDb == dbName) {
+                useDatabase("master"); // Switch back to master if deletion fails
+            } else {
+                useDatabase(tempDb); // Restore original database
+            }
+            return false;
+        }
+    } catch (const std::exception& e) {
+ panic:       std::cerr << "Error: Could not delete database directory '" << dbPath << "': " << e.what() << "\n";
+        if (currentDb == dbName) {
+            useDatabase("master");
+        } else {
+            useDatabase(tempDb);
+        }
+        return false;
+    }
+
+    // Remove the database from the list
+    databases.erase(it);
+
+    // Save the updated catalog
+    if (currentDb == dbName) {
+        useDatabase("master"); // Switch to master if current database was dropped
+    } else {
+        useDatabase(tempDb); // Restore original database
+    }
+
+    if (!saveCatalog()) {
+        std::cout << "Error: Could not save catalog metadata after dropping database.\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseCatalog::useDatabase(const std::string& dbName) {
+    if (std::find(databases.begin(), databases.end(), dbName) == databases.end()) {
+        std::cout << "Error: Database '" << dbName << "' does not exist.\n";
+        return false;
+    }
+    
+    for (auto& pair : openTables) {
+        closeTable(pair.second);
+    }
+    openTables.clear();
+    
+    currentDb = dbName;
+    loadCatalog();
+    
+    std::cout << "Using database: " << dbName << "\n";
+    return true;
+}
+
+std::vector<std::string> DatabaseCatalog::listDatabases() {
+    return databases;
+}
+
 bool DatabaseCatalog::saveCatalog() {
     std::ofstream file(getCatalogFilePath());
     if (!file.is_open()) {
@@ -68,19 +245,16 @@ bool DatabaseCatalog::saveCatalog() {
         return false;
     }
     
-    // Write databases section
     file << "DATABASES\n";
     for (const auto& db : databases) {
         file << db << "\n";
     }
     
-    // Write tables section
     file << "TABLES\n";
     for (const auto& table : tables) {
         file << table.tableName << "\n";
         file << table.filename << "\n";
         
-        // Write columns in format name:type,name:type,...
         for (size_t i = 0; i < table.columnNames.size(); i++) {
             file << table.columnNames[i] << ":" << table.columnTypes[i];
             if (i < table.columnNames.size() - 1) {
@@ -94,150 +268,108 @@ bool DatabaseCatalog::saveCatalog() {
     return true;
 }
 
-std::string DatabaseCatalog::getCatalogFilePath() {
-    return getDatabasePath(currentDb) + "/catalog.db";
-}
-
-std::string DatabaseCatalog::getDatabasePath(const std::string& dbName) {
-    return "./databases/" + dbName;
-}
-
-std::string DatabaseCatalog::getTablePath(const std::string& tableName) {
-    return getDatabasePath(currentDb) + "/" + tableName + ".db";
-}
-std::string DatabaseCatalog::getTableName(Table* tablePtr) const {
-    // Search through open tables to find the one that matches the pointer
-    for (const auto& pair : openTables) {
-        if (pair.second == tablePtr) {
-            return pair.first;
-        }
-    }
-    
-    // If the table isn't found in open tables
-    return "";
-}
-DatabaseCatalog::~DatabaseCatalog() {
-    // Close all open tables
-    for (auto& pair : openTables) {
-        db_close(pair.second);
-    }
-    // Save catalog changes
-    saveCatalog();
-}
-
-bool DatabaseCatalog::createDatabase(const std::string& dbName) {
-    // ...
-    std::string dbPath = getDatabasePath(dbName);
-    if (!create_directories(dbPath)) {
-        std::cout << "Error: Could not create database directory.\n";
-        return false;
-    }
-     
-    // Create the database directory
-   dbPath = getDatabasePath(dbName);
-    if (!create_directories(dbPath)) {
-        std::cout << "Error: Could not create database directory.\n";
-        return false;
-    }
-    
-    // Add to the list of databases
-    databases.push_back(dbName);
-    
-    // Save the up
-    // ...
-}
-
-bool DatabaseCatalog::useDatabase(const std::string& dbName) {
-    // Check if database exists
-    if (std::find(databases.begin(), databases.end(), dbName) == databases.end()) {
-        std::cout << "Error: Database '" << dbName << "' does not exist.\n";
-        return false;
-    }
-    
-    // Close all open tables from current database
-    for (auto& pair : openTables) {
-        db_close(pair.second);
-    }
-    openTables.clear();
-    
-    // Switch to new database
-    currentDb = dbName;
-    loadCatalog();  // Load tables for the new database
-    
-    std::cout << "Using database: " << dbName << "\n";
-    return true;
-}
 bool DatabaseCatalog::loadCatalog() {
-
- std::string catalogPath = getCatalogFilePath();
+    std::string catalogPath = getCatalogFilePath();
+    std::ifstream file(catalogPath);
     
-    // If catalog file doesn't exist, initialize fresh database
-    if (!std::ifstream(catalogPath)) {
-        tables.clear();
-        return true; // Fresh database with no tables
-    }
-    std::ifstream file(getCatalogFilePath());
-  
-    std::string line;
-    std::string section = "";
-    
-    while (std::getline(file, line)) {
-        if (line == "DATABASES") {
-            section = "DATABASES";
-            continue;
-        } else if (line == "TABLES") {
-            section = "TABLES";
-            continue;
+    // If catalog doesn't exist, initialize fresh state
+    if (!file.is_open()) {
+        // Only initialize if this is the first time
+        if (databases.empty()) {
+            databases.push_back(currentDb);
         }
-        
-        if (section == "DATABASES") {
-            databases.push_back(line);
-        } else if (section == "TABLES") {
-            // Read table name
-            std::string tableName = line;
+        tables.clear();
+        return true;
+    }
+
+    // Temporary storage for loaded data
+    std::vector<std::string> loadedDatabases;
+    std::vector<TableMetadata> loadedTables;
+    
+    std::string line;
+    std::string section;
+    
+    try {
+        while (std::getline(file, line)) {
+            // Skip empty lines
+            if (line.empty()) continue;
             
-            // Read filename
-            std::getline(file, line);
-            std::string filename = line;
-            
-            // Read columns
-            std::getline(file, line);
-            std::vector<std::string> columnNames;
-            std::vector<std::string> columnTypes;
-            
-            std::string columnInfo = line;
-            std::string token;
-            std::istringstream columnStream(columnInfo);
-            
-            while (std::getline(columnStream, token, ',')) {
-                size_t pos = token.find(':');
-                if (pos != std::string::npos) {
-                    std::string name = token.substr(0, pos);
-                    std::string type = token.substr(pos + 1);
-                    columnNames.push_back(name);
-                    columnTypes.push_back(type);
-                }
+            if (line == "DATABASES") {
+                section = "DATABASES";
+                continue;
+            } else if (line == "TABLES") {
+                section = "TABLES";
+                continue;
             }
             
-            TableMetadata metadata;
-            metadata.tableName = tableName;
-            metadata.filename = filename;
-            metadata.columnNames = columnNames;
-            metadata.columnTypes = columnTypes;
-            
-            tables.push_back(metadata);
+            if (section == "DATABASES") {
+                loadedDatabases.push_back(line);
+            } else if (section == "TABLES") {
+                TableMetadata metadata;
+                metadata.tableName = line;
+                
+                // Read filename
+                if (!std::getline(file, line)) throw std::runtime_error("Unexpected EOF reading filename");
+                metadata.filename = line;
+                
+                // Read columns
+                if (!std::getline(file, line)) throw std::runtime_error("Unexpected EOF reading columns");
+                
+                // Parse columns
+                std::istringstream columnStream(line);
+                std::string columnDef;
+                while (std::getline(columnStream, columnDef, ',')) {
+                    size_t colonPos = columnDef.find(':');
+                    if (colonPos == std::string::npos) {
+                        throw std::runtime_error("Invalid column format: " + columnDef);
+                    }
+                    metadata.columnNames.push_back(columnDef.substr(0, colonPos));
+                    metadata.columnTypes.push_back(columnDef.substr(colonPos + 1));
+                }
+                
+                loadedTables.push_back(metadata);
+            }
+        }
+        
+        // Only update state if everything succeeded
+        databases = loadedDatabases;
+        tables = loadedTables;
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Catalog load error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool DatabaseCatalog::createTable(const std::string& tableName,
+                                 const std::vector<std::string>& columnNames,
+                                 const std::vector<std::string>& columnTypes) {
+    for (const auto& table : tables) {
+        if (table.tableName == tableName) {
+            std::cout << "Error: Table '" << tableName << "' already exists.\n";
+            return false;
         }
     }
     
-    file.close();
+    TableMetadata metadata;
+    metadata.tableName = tableName;
+    metadata.filename = getTablePath(tableName);
+    metadata.columnNames = columnNames;
+    metadata.columnTypes = columnTypes;
+    
+    tables.push_back(metadata);
+    
+    Table* table = db_open(metadata.filename);
+    openTables[tableName] = table;
+    
+    saveCatalog();
+    std::cout << "Table created: " << tableName << "\n";
     return true;
 }
 
-
-
 bool DatabaseCatalog::dropTable(const std::string& tableName) {
-    // Find the table in our metadata
-    auto it = std::find_if(tables.begin(), tables.end(), 
+    auto it = std::find_if(tables.begin(), tables.end(),
                           [&](const TableMetadata& t) { return t.tableName == tableName; });
     
     if (it == tables.end()) {
@@ -245,13 +377,10 @@ bool DatabaseCatalog::dropTable(const std::string& tableName) {
         return false;
     }
     
-    // Close the table if it's open
     if (openTables.find(tableName) != openTables.end()) {
-        db_close(openTables[tableName]);
-        openTables.erase(tableName);
+        closeTable(openTables[tableName]);
     }
     
-    // Delete the file
     std::string filename = it->filename;
     #ifdef _WIN32
         bool deleted = (DeleteFileA(filename.c_str()) != 0);
@@ -261,115 +390,25 @@ bool DatabaseCatalog::dropTable(const std::string& tableName) {
     
     if (!deleted) {
         std::cerr << "Warning: Could not delete table file.\n";
-        // Continue anyway - we'll still remove the metadata
     }
     
-    // Remove from tables list
     tables.erase(it);
     
-    // Save updated catalog
     saveCatalog();
     return true;
 }
 
-// Add this implementation after your existing createTable method
-bool DatabaseCatalog::createTable(const std::string& dbName, const std::string& tableName, 
-                                 const std::string& tablePath, const std::string& schema) {
-    // Check if table already exists
-    for (const auto& table : tables) {
-        if (table.tableName == tableName) {
-            std::cout << "Error: Table '" << tableName << "' already exists.\n";
-            return false;
+std::string DatabaseCatalog::getTableName(Table* tablePtr) const {
+    for (const auto& pair : openTables) {
+        if (pair.second == tablePtr) {
+            return pair.first;
         }
     }
-    
-    // Parse schema string to extract column names and types
-    std::vector<std::string> columnNames;
-    std::vector<std::string> columnTypes;
-    
-    if (!schema.empty()) {
-        std::string token;
-        std::istringstream schemaStream(schema);
-        
-        while (std::getline(schemaStream, token, ',')) {
-            size_t pos = token.find(':');
-            if (pos != std::string::npos) {
-                std::string name = token.substr(0, pos);
-                std::string type = token.substr(pos + 1);
-                columnNames.push_back(name);
-                columnTypes.push_back(type);
-            }
-        }
-    }
-    
-    // Create table metadata
-    TableMetadata metadata;
-    metadata.tableName = tableName;
-    metadata.filename = tablePath; // Use the provided path
-    metadata.columnNames = columnNames;
-    metadata.columnTypes = columnTypes;
-    
-    // Add to tables list
-    tables.push_back(metadata);
-    
-    // Create empty table file
-    Table* table = db_open(metadata.filename);
-    openTables[tableName] = table;
-    
-    saveCatalog();
-    std::cout << "Table created: " << tableName << "\n";
-    return true;
-}
-bool renameFile(const std::string& oldPath, const std::string& newPath) {
-    #ifdef _WIN32
-        return MoveFileA(oldPath.c_str(), newPath.c_str()) != 0;
-    #else
-        return rename(oldPath.c_str(), newPath.c_str()) == 0;
-    #endif
+    return "";
 }
 
-std::string DatabaseCatalog::getCurrentDatabase() const {
-    return currentDb;
-}
-bool DatabaseCatalog::dropDatabase(const std::string& dbName) {
-    // Check if database exists
-    auto it = std::find(databases.begin(), databases.end(), dbName);
-    if (it == databases.end()) {
-        std::cout << "Error: Database '" << dbName << "' does not exist.\n";
-        return false;
-    }
-    
-    // Can't drop current database
-    if (currentDb == dbName) {
-        std::cout << "Error: Cannot drop currently selected database.\n";
-        return false;
-    }
-    
-    // Get database path
-    std::string dbPath = getDatabasePath(dbName);
-    
-    // Remove directory and all contents
-    #ifdef _WIN32
-        std::string cmd = "rmdir /s /q \"" + dbPath + "\"";
-    #else
-        std::string cmd = "rm -rf \"" + dbPath + "\"";
-    #endif
-    
-    if (system(cmd.c_str()) != 0) {
-        std::cout << "Error: Failed to remove database directory.\n";
-        return false;
-    }
-    
-    // Remove from databases list
-    databases.erase(it);
-    
-    // Save catalog
-    saveCatalog();
-    return true;
-}
 bool DatabaseCatalog::alterTableName(const std::string& oldName, const std::string& newName) {
-    // Find the table
-    auto it = std::find_if(tables.begin(), tables.end(), 
+    auto it = std::find_if(tables.begin(), tables.end(),
                           [&](const TableMetadata& t) { return t.tableName == oldName; });
     
     if (it == tables.end()) {
@@ -377,8 +416,7 @@ bool DatabaseCatalog::alterTableName(const std::string& oldName, const std::stri
         return false;
     }
     
-    // Check if new name already exists
-    auto newIt = std::find_if(tables.begin(), tables.end(), 
+    auto newIt = std::find_if(tables.begin(), tables.end(),
                              [&](const TableMetadata& t) { return t.tableName == newName; });
     
     if (newIt != tables.end()) {
@@ -386,27 +424,25 @@ bool DatabaseCatalog::alterTableName(const std::string& oldName, const std::stri
         return false;
     }
     
-    // Close the table if it's open
     if (openTables.find(oldName) != openTables.end()) {
-        db_close(openTables[oldName]);
+        Table* table = openTables[oldName];
         openTables.erase(oldName);
+        openTables[newName] = table;
     }
     
-    // Get old and new filenames
     std::string oldFilename = it->filename;
     std::string newFilename = getTablePath(newName);
     
-    // Rename file
-   try {
-    if (!renameFile(oldFilename, newFilename)) {
+    try {
+        if (!renameFile(oldFilename, newFilename)) {
+            std::cout << "Error renaming table file\n";
+            return false;
+        }
+    } catch (...) {
         std::cout << "Error renaming table file\n";
         return false;
     }
-} catch (...) {
-    std::cout << "Error renaming table file\n";
-    return false;
-}
-    // Update metadata
+    
     it->tableName = newName;
     it->filename = newFilename;
     
@@ -421,4 +457,57 @@ std::vector<std::string> DatabaseCatalog::listTables() {
         tableNames.push_back(table.tableName);
     }
     return tableNames;
+}
+
+Table* DatabaseCatalog::openTable(const std::string& tableName) {
+    auto it = std::find_if(tables.begin(), tables.end(),
+                           [&](const TableMetadata& t) { return t.tableName == tableName; });
+    if (it == tables.end()) {
+        std::cout << "Error: Table '" << tableName << "' does not exist.\n";
+        return nullptr;
+    }
+
+    if (openTables.find(tableName) != openTables.end()) {
+        return openTables[tableName];
+    }
+
+    Table* table = db_open(it->filename);
+    openTables[tableName] = table;
+    return table;
+}
+
+void DatabaseCatalog::closeTable(Table* table) {
+    if (!table) return;
+
+    auto it = openTables.begin();
+    while (it != openTables.end()) {
+        if (it->second == table) {
+            db_close(table);
+            it = openTables.erase(it);
+            return;
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::string DatabaseCatalog::getDatabasePath(const std::string& dbName) {
+    return "./databases/" + dbName;
+}
+
+std::string DatabaseCatalog::getTablePath(const std::string& tableName) {
+    return getDatabasePath(currentDb) + "/" + tableName + ".db";
+}
+
+std::string DatabaseCatalog::getCatalogFilePath() {
+    return getDatabasePath(currentDb) + "/catalog.db";
+}
+
+TableMetadata DatabaseCatalog::getTableMetadata(const std::string& tableName) {
+    auto it = std::find_if(tables.begin(), tables.end(),
+                           [&](const TableMetadata& t) { return t.tableName == tableName; });
+    if (it != tables.end()) {
+        return *it;
+    }
+    return TableMetadata();
 }

@@ -1,12 +1,19 @@
+#ifdef _WIN32
+#pragma comment(lib, "ws2_32.lib")
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+#include "http/cpp-httplib/httplib.h"
+#include "json.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
 #include <cstdint>
-#include <limits>
 #include <vector>
-#include <fstream>
 #include <algorithm>
-#include <cstring> 
+#include <map>
+#include <mutex>
 #include "catalog.h"
 #include "input_handler.h"
 #include "row.h"
@@ -14,571 +21,583 @@
 #include "pager.h"
 #include "table.h"
 #include "btree.h"
+#include "transaction_manager.h"
+#include "parser.h"
 
-// Add this function definition OUTSIDE of the main() function, at the top of your file
-void showTables(const std::string& currentDatabase) {
-    // Open the catalog file
-    std::ifstream catalog("./databases/" + currentDatabase + "/catalog.db");
+// Session storage for per-client state
+struct Session {
+    Table* current_table = nullptr;
+    std::string current_db = "master";
+    std::string current_table_name;
+};
+std::map<std::string, Session> sessions; // Map session ID to state
+std::mutex sessions_mutex; // Protect session map
 
-    if (!catalog.is_open()) {
-        std::cout << "Error: Could not open catalog file." << std::endl;
-        return;
-    }
-    
-    std::string line;
-    bool inTablesSection = false;
-    std::vector<std::string> tableNames;
-    
-    // Find the TABLES section and read entries
-    while (std::getline(catalog, line)) {
-        if (line == "TABLES") {
-            inTablesSection = true;
-            continue;
-        }
-        
-        if (inTablesSection) {
-            // Parse the line (format: db:tableName:path:schema)
-            std::istringstream iss(line);
-            std::string dbName, tableName, rest;
-            
-            // Extract the database name and table name
-            std::getline(iss, dbName, ':');
-            std::getline(iss, tableName, ':');
-            
-            // Only show tables for the current database
-            if (dbName == currentDatabase) {
-                tableNames.push_back(tableName);
+void handleCommand(const std::string& command_input, DatabaseCatalog& catalog, TransactionManager& txn_manager,
+                  Session& session, uint32_t transaction_id, nlohmann::json& response) {
+    std::stringstream response_stream;
+    std::stringstream ss(command_input);
+    CommandType command = parse_command(command_input);
+
+    switch (command) {
+        case CommandType::CREATE_DB: {
+            std::string create_keyword, db_keyword, db_name;
+            ss >> create_keyword >> db_keyword >> db_name;
+            if (ss.fail() || create_keyword != "create" || db_keyword != "database") {
+                response["error"] = "Syntax error. Usage: create database <database_name>";
+                return;
             }
-        }
-    }
-    
-    // Display tables
-    if (tableNames.empty()) {
-        std::cout << "No tables found in database '" << currentDatabase << "'" << std::endl;
-    } else {
-        std::cout << "Tables in database '" << currentDatabase << "':" << std::endl;
-        for (const auto& name : tableNames) {
-            std::cout << "  - " << name << std::endl;
-        }
-    }
-    
-    catalog.close();
-}
-
-
-
-
-
-int main() {
-    std::string currentDatabase = "master"; // Default database
-    // Open or create the database table
-    Table* table = db_open("mydb.db");
-
-    std::string input;
-    // Main command loop
-    while (true) {
-        std::cout << "db > ";
-        std::getline(std::cin, input);
-
-        // Handle the exit command
-        if (input == ".exit") {
-            db_close(table); // Close the database before exiting
-            std::cout << "Exiting...\n";
+            if (txn_manager.isInTransaction(transaction_id)) {
+                response["error"] = "Cannot create database during an active transaction.";
+                return;
+            }
+            if (catalog.createDatabase(db_name)) {
+                response["message"] = "Database '" + db_name + "' created successfully.";
+            } else {
+                response["error"] = "Failed to create database '" + db_name + "'.";
+            }
             break;
         }
-        // Parse the user input command
-        CommandType command = parse_command(input);
-        switch (command) {
-            case CommandType::INSERT: {
-                std::stringstream ss(input);
-                std::string keyword;
-                int id;
-                std::string name, email;
-                // Parse insert command arguments
-                ss >> keyword >> id >> name >> email;
-                // Check for syntax errors or missing arguments
-                if (ss.fail()) {
-                    std::cout << "Syntax error. Usage: insert <id> <name> <email>\n";
-                    ss.clear();
-                    ss.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                    break;
-                }
-                // Check for extra input after the expected arguments
-                std::string remaining;
-                if (ss >> remaining) {
-                     std::cout << "Syntax error: Extra input after email.\n Usage: insert <id> <name> <email>\n";
-                     break;
-                }
-                // Validate name and email lengths
-                if (name.length() >= COLUMN_NAME_SIZE) {
-                    std::cout << "Error: Name is too long (max " << COLUMN_NAME_SIZE - 1 << " characters).\n";
-                    break;
-                }
-                if (email.length() >= COLUMN_EMAIL_SIZE) {
-                     std::cout << "Error: Email is too long (max " << COLUMN_EMAIL_SIZE - 1 << " characters).\n";
-                    break;
-                }
-                // Check for duplicate ID using the B-tree index
-                uint32_t existing_row_num = table->btree->search(id);
-                if (existing_row_num != std::numeric_limits<uint32_t>::max()) {
-                    // If a row with the same ID exists, check if it's deleted
-                    if (!is_row_freed(table, existing_row_num)) {
-                         std::cout << "Error: Duplicate ID. Row with ID " << id << " already exists at row number " << existing_row_num << ".\n";
-                         break;
-                    } else {
-                         std::cout << "Warning: Duplicate ID " << id << " found in index but marked as deleted at row number " << existing_row_num << ". Inserting as a new row.\n";
-                    }
-                }
-                // Always append to the end of the allocated rows for now.
-                uint32_t row_to_insert_at = table->num_rows;
-                // Check if the table is full
-                if (row_to_insert_at >= TABLE_MAX_ROWS) {
-                    std::cout << "Error: Table full.\n";
-                    break;
-                }
-                // Create and serialize the new row
-                Row row = create_row(id, name, email); // create_row initializes is_deleted to false
-                void* row_slot = get_row_slot(table, row_to_insert_at);
-                serialize_row(row, row_slot);
-                table->num_rows++; // Increment total allocated row count
-                // Insert the new row's ID and row number into the B-tree index
-                table->btree->insert(id, row_to_insert_at);
-                // Mark the page containing the new row as dirty so it gets flushed to disk
-                uint32_t page_num;
-                 if (row_to_insert_at < ROWS_PER_PAGE_PAGE_0) {
-                     page_num = 0;
-                 } else {
-                     uint32_t row_num_after_page_0 = row_to_insert_at - ROWS_PER_PAGE_PAGE_0;
-                     page_num = 1 + (row_num_after_page_0 / ROWS_PER_PAGE_OTHER_PAGES);
-                 }
-                table->pager->pages_dirty[page_num] = true;
-                std::cout << "Row inserted.\n";
-                break;
+        case CommandType::DROP_DB: {
+            std::string drop_keyword, db_keyword, db_name;
+            ss >> drop_keyword >> db_keyword >> db_name;
+            if (ss.fail() || drop_keyword != "drop" || db_keyword != "database") {
+                response["error"] = "Syntax error. Usage: drop database <database_name>";
+                return;
             }
-            case CommandType::SELECT: {
-                std::stringstream ss(input);
-                std::string keyword;
-                std::string next_word;
-                ss >> keyword;
-                ss >> next_word;
-                // Handle full table scan (select command without 'where')
-                if (ss.fail()) {
-                    // Iterate through all allocated rows
-                    if (table->num_rows == 0) {
-                        std::cout << "Table is empty.\n";
-                    } else {
-                        std::cout << "Retrieving all rows....:\n";
-                        uint32_t rows_displayed = 0;
-                        for (uint32_t i = 0; i < table->num_rows; i++) {
-                             // Check if the row is marked as deleted
-                             bool is_freed = is_row_freed(table, i);
-                            if (!is_freed) { // Only print if not deleted
-                                void* row_slot = get_row_slot(table, i);
-                                Row row;
-                                deserialize_row(row_slot, row);
-                                print_row(row);
-                                rows_displayed++;
-                            }
-                        }
-                         if (rows_displayed == 0 && table->num_rows > 0) {
-                             std::cout << "All rows currently allocated are deleted.\n";
-                         } else if (table->num_rows == 0) {
-                             // Already handled by the initial check, but good to be explicit
-                         }
+            if (txn_manager.isInTransaction(transaction_id)) {
+                response["error"] = "Cannot drop database during an active transaction.";
+                return;
+            }
+            if (session.current_table) {
+                catalog.closeTable(session.current_table);
+                session.current_table = nullptr;
+                session.current_table_name.clear();
+            }
+            txn_manager.setCurrentDatabase("master");
+            if (catalog.dropDatabase(db_name)) {
+                if (session.current_db == db_name) {
+                    session.current_db = "master";
+                    session.current_table = nullptr;
+                    session.current_table_name.clear();
+                    txn_manager.setCurrentDatabase("master");
+                }
+                response["message"] = "Database '" + db_name + "' dropped successfully.";
+            } else {
+                response["error"] = "Failed to drop database '" + db_name + "'.";
+            }
+            break;
+        }
+        case CommandType::USE_DB: {
+            std::string use_keyword, db_name;
+            ss >> use_keyword >> db_name;
+            if (ss.fail() || use_keyword != "use") {
+                response["error"] = "Syntax error. Usage: use <database_name>";
+                return;
+            }
+            if (txn_manager.isInTransaction(transaction_id)) {
+                response["error"] = "Cannot change database during an active transaction.";
+                return;
+            }
+            if (session.current_table) {
+                catalog.closeTable(session.current_table);
+                session.current_table = nullptr;
+                session.current_table_name.clear();
+            }
+            if (catalog.useDatabase(db_name)) {
+                session.current_db = db_name;
+                txn_manager.setCurrentDatabase(db_name);
+                response["message"] = "Now using database '" + db_name + "'.";
+            } else {
+                response["error"] = "Database '" + db_name + "' does not exist.";
+            }
+            break;
+        }
+        case CommandType::CREATE_TABLE: {
+            std::string create_keyword, table_keyword, table_name;
+            ss >> create_keyword >> table_keyword >> table_name;
+            if (ss.fail() || create_keyword != "create" || table_keyword != "table") {
+                response["error"] = "Syntax error. Usage: create table <table_name> (<column_name> <type>, ...)";
+                return;
+            }
+            std::string columns_str;
+            std::getline(ss, columns_str);
+            size_t open_paren = columns_str.find('(');
+            size_t close_paren = columns_str.find_last_of(')');
+            if (open_paren == std::string::npos || close_paren == std::string::npos) {
+                response["error"] = "Syntax error: Missing parentheses in column definitions.";
+                return;
+            }
+            std::string columns_content = columns_str.substr(open_paren + 1, close_paren - open_paren - 1);
+            std::stringstream columns_stream(columns_content);
+            std::string column_def;
+            std::vector<std::string> column_names, column_types;
+            while (std::getline(columns_stream, column_def, ',')) {
+                column_def.erase(0, column_def.find_first_not_of(" \t"));
+                column_def.erase(column_def.find_last_not_of(" \t") + 1);
+                std::stringstream col_stream(column_def);
+                std::string col_name, col_type;
+                col_stream >> col_name >> col_type;
+                if (col_stream.fail() || col_name.empty() || col_type.empty()) {
+                    response["error"] = "Syntax error in column definition: " + column_def;
+                    return;
+                }
+                column_names.push_back(col_name);
+                column_types.push_back(col_type);
+            }
+            if (!column_names.empty() && column_names.size() == column_types.size()) {
+                std::vector<std::string> expected_names = {"id", "name", "email"};
+                std::vector<std::string> expected_types = {"int", "varchar", "varchar"};
+                if (column_names != expected_names || column_types != expected_types) {
+                    response["error"] = "Table schema must be (id int, name varchar, email varchar).";
+                    return;
+                }
+                if (catalog.createTable(table_name, column_names, column_types)) {
+                    if (session.current_table) {
+                        catalog.closeTable(session.current_table);
                     }
-                } else if (next_word == "where") { // Handle select with a where clause
-                    std::string id_keyword;
-                    std::string equals_sign;
-                    int search_id;
-                    // Parse the where clause arguments
-                    ss >> id_keyword >> equals_sign >> search_id;
-                    // Check for syntax errors in the where clause
-                    if (ss.fail() || id_keyword != "id" || equals_sign != "=") {
-                        std::cout << "Syntax error. Usage: select where id = <id>\n";
-                        ss.clear();
-                        ss.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                        break;
-                    }
-
-                     // Check for extra input after the where clause
-                     std::string remaining;
-                    if (ss >> remaining) {
-                        std::cout << "Syntax error: Extra input after ID.\n Usage: select where id = <id>\n";
-                        break;
-                    }
-
-                    // Search the B-tree for the row number associated with the ID
-                    uint32_t found_row_num = table->btree->search(search_id);
-
-                    // If the ID is found in the index
-                    if (found_row_num != std::numeric_limits<uint32_t>::max()) {
-                         // Check if the row is marked as deleted
-                         if (!is_row_freed(table, found_row_num)) {
-                            std::cout << "Found row with ID " << search_id << " at row number " << found_row_num << ":\n";
-                            void* row_slot = get_row_slot(table, found_row_num);
+                    session.current_table = catalog.openTable(table_name);
+                    session.current_table_name = table_name;
+                    response["message"] = "Table '" + table_name + "' created and opened successfully.";
+                } else {
+                    response["error"] = "Failed to create table '" + table_name + "'.";
+                }
+            } else {
+                response["error"] = "No valid column definitions provided.";
+            }
+            break;
+        }
+        case CommandType::SHOW_TABLES: {
+            std::string show_keyword, tables_keyword;
+            ss >> show_keyword >> tables_keyword;
+            if (ss.fail() || show_keyword != "show" || tables_keyword != "tables") {
+                response["error"] = "Syntax error. Usage: show tables";
+                return;
+            }
+            std::vector<std::string> tables = catalog.listTables();
+            if (tables.empty()) {
+                response["message"] = "No tables found in the current database.";
+            } else {
+                nlohmann::json tables_array = nlohmann::json::array();
+                for (const auto& table_name : tables) {
+                    tables_array.push_back(table_name);
+                }
+                response["message"] = "Tables in the current database:";
+                response["tables"] = tables_array;
+            }
+            break;
+        }
+        case CommandType::DROP_TABLE: {
+            std::string drop_keyword, table_keyword, table_name;
+            ss >> drop_keyword >> table_keyword >> table_name;
+            if (ss.fail() || drop_keyword != "drop" || table_keyword != "table") {
+                response["error"] = "Syntax error. Usage: drop table <table_name>";
+                return;
+            }
+            if (txn_manager.isInTransaction(transaction_id)) {
+                response["error"] = "Cannot drop table during an active transaction.";
+                return;
+            }
+            if (session.current_table && catalog.getTableName(session.current_table) == table_name) {
+                catalog.closeTable(session.current_table);
+                session.current_table = nullptr;
+                session.current_table_name.clear();
+            }
+            if (catalog.dropTable(table_name)) {
+                response["message"] = "Table '" + table_name + "' dropped successfully.";
+            } else {
+                response["error"] = "Failed to drop table '" + table_name + "'.";
+            }
+            break;
+        }
+        case CommandType::ALTER_TABLE: {
+            std::string alter_keyword, table_keyword, table_name, rename_keyword, to_keyword, new_table_name;
+            ss >> alter_keyword >> table_keyword >> table_name >> rename_keyword >> to_keyword >> new_table_name;
+            if (ss.fail() || alter_keyword != "alter" || table_keyword != "table" ||
+                rename_keyword != "rename" || to_keyword != "to") {
+                response["error"] = "Syntax error. Usage: alter table <table_name> rename to <new_table_name>";
+                return;
+            }
+            if (txn_manager.isInTransaction(transaction_id)) {
+                response["error"] = "Cannot alter table during an active transaction.";
+                return;
+            }
+            if (session.current_table && catalog.getTableName(session.current_table) == table_name) {
+                catalog.closeTable(session.current_table);
+                session.current_table = nullptr;
+                session.current_table_name.clear();
+            }
+            if (catalog.alterTableName(table_name, new_table_name)) {
+                response["message"] = "Table renamed from '" + table_name + "' to '" + new_table_name + "' successfully.";
+            } else {
+                response["error"] = "Failed to rename table from '" + table_name + "' to '" + new_table_name + "'.";
+            }
+            break;
+        }
+        case CommandType::INSERT: {
+            if (!session.current_table) {
+                response["error"] = "No table selected. Use 'use table'.";
+                return;
+            }
+            if (transaction_id != 0 && !txn_manager.acquireLock(transaction_id, session.current_table_name, LockType::EXCLUSIVE)) {
+                response["error"] = "Transaction " + std::to_string(transaction_id) + " waiting for exclusive lock on table '" + session.current_table_name + "'.";
+                return;
+            }
+            std::string keyword;
+            int id;
+            std::string name, email;
+            ss >> keyword >> id >> name >> email;
+            if (ss.fail()) {
+                response["error"] = "Syntax error. Usage: insert <id> <name> <email>";
+                return;
+            }
+            if (name.length() >= COLUMN_NAME_SIZE || email.length() >= COLUMN_EMAIL_SIZE) {
+                response["error"] = "Name or email too long.";
+                return;
+            }
+            uint32_t existing_row_num = session.current_table->btree->search(id);
+            if (existing_row_num != std::numeric_limits<uint32_t>::max() && !is_row_freed(session.current_table, existing_row_num)) {
+                response["error"] = "Duplicate ID " + std::to_string(id) + ".";
+                return;
+            }
+            uint32_t row_to_insert_at = session.current_table->num_rows;
+            if (row_to_insert_at >= TABLE_MAX_ROWS) {
+                response["error"] = "Table full.";
+                return;
+            }
+            Row row = create_row(id, name, email);
+            if (txn_manager.isInTransaction(transaction_id)) {
+                txn_manager.logInsert(transaction_id, session.current_table_name, row_to_insert_at, row);
+            }
+            void* row_slot = get_row_slot(session.current_table, row_to_insert_at);
+            serialize_row(row, row_slot);
+            session.current_table->num_rows++;
+            session.current_table->btree->insert(id, row_to_insert_at);
+            uint32_t page_num = (row_to_insert_at < ROWS_PER_PAGE_PAGE_0) ? 0 : 1 + ((row_to_insert_at - ROWS_PER_PAGE_PAGE_0) / ROWS_PER_PAGE_OTHER_PAGES);
+            session.current_table->pager->pages_dirty[page_num] = true;
+            response["message"] = "Row inserted.";
+            break;
+        }
+        case CommandType::SELECT: {
+            if (!session.current_table) {
+                response["error"] = "No table selected.";
+                return;
+            }
+            if (transaction_id != 0 && !txn_manager.acquireLock(transaction_id, session.current_table_name, LockType::SHARED)) {
+                response["error"] = "Transaction " + std::to_string(transaction_id) + " waiting for shared lock.";
+                return;
+            }
+            std::string keyword, next_word;
+            ss >> keyword >> next_word;
+            if (ss.fail()) {
+                if (session.current_table->num_rows == 0) {
+                    response["message"] = "Table is empty.";
+                } else {
+                    nlohmann::json rows = nlohmann::json::array();
+                    for (uint32_t i = 0; i < session.current_table->num_rows; i++) {
+                        if (!is_row_freed(session.current_table, i)) {
+                            void* row_slot = get_row_slot(session.current_table, i);
                             Row row;
                             deserialize_row(row_slot, row);
-                            print_row(row);
-                         } else {
-                             std::cout << "Row with ID " << search_id << " found in index but marked as deleted.\n";
-                         }
-                    } else {
-                        std::cout << "Row with ID " << search_id << " not found.\n";
+                            rows.push_back({{"id", row.id}, {"name", row.name}, {"email", row.email}});
+                        }
                     }
-
+                    response["message"] = "Rows retrieved.";
+                    response["rows"] = rows;
+                }
+            } else if (next_word == "where") {
+                std::string id_keyword, equals_sign;
+                int search_id;
+                ss >> id_keyword >> equals_sign >> search_id;
+                if (ss.fail() || id_keyword != "id" || equals_sign != "=") {
+                    response["error"] = "Syntax error. Usage: select where id = <id>";
+                    return;
+                }
+                uint32_t found_row_num = session.current_table->btree->search(search_id);
+                if (found_row_num != std::numeric_limits<uint32_t>::max() && !is_row_freed(session.current_table, found_row_num)) {
+                    void* row_slot = get_row_slot(session.current_table, found_row_num);
+                    Row row;
+                    deserialize_row(row_slot, row);
+                    response["message"] = "Found row.";
+                    response["row"] = {{"id", row.id}, {"name", row.name}, {"email", row.email}};
                 } else {
-                    std::cout << "Syntax error after 'select'. Usage: select or select where id = <id>\n";
-                    ss.clear();
-                    ss.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                    response["message"] = "Row with ID " + std::to_string(search_id) + " not found or deleted.";
                 }
-                break;
+            } else {
+                response["error"] = "Syntax error. Usage: select or select where id = <id>";
             }
-            case CommandType::DELETE: {
-                std::stringstream ss(input);
-                std::string keyword;
-                std::string from_keyword;
-                std::string table_name;
-                std::string where_keyword;
-                std::string id_keyword;
-                std::string equals_sign;
-                int delete_id;
-                // Parse the delete command arguments
-                ss >> keyword >> from_keyword >> table_name >> where_keyword >> id_keyword >> equals_sign >> delete_id;
-
-                // Check for syntax errors
-                if (ss.fail() || keyword != "delete" || from_keyword != "from" || table_name != "table" ||
-                    where_keyword != "where" || id_keyword != "id" || equals_sign != "=") {
-                    std::cout << "Syntax error. Usage: delete from table where id = <id>\n";
-                    ss.clear();
-                    ss.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                    break;
-                }
-                 // Check for extra input after the ID
-                 std::string remaining;
-                if (ss >> remaining) {
-                    std::cout << "Syntax error: Extra input after ID.\n Usage: delete from table where id = <id>\n";
-                    break;
-                }
-                // Search the B-tree for the row number associated with the ID
-                uint32_t row_num_to_delete = table->btree->search(delete_id);
-                // If the ID is found in the index
-                if (row_num_to_delete != std::numeric_limits<uint32_t>::max()) {
-                    // Attempt to remove the ID from the B-tree index
-                    bool removed_from_btree = table->btree->remove(delete_id);
-                    if (removed_from_btree) {
-                        // Get the row slot and mark the row as deleted
-                        void* row_slot = get_row_slot(table, row_num_to_delete);
-                        Row row;
-                        deserialize_row(row_slot, row);
-                        row.is_deleted = true; // Mark as deleted
-                        serialize_row(row, row_slot); // Write the updated row back
-                        // Mark the page containing the deleted row as dirty
-                        uint32_t page_num;
-                         if (row_num_to_delete < ROWS_PER_PAGE_PAGE_0) {
-                             page_num = 0;
-                         } else {
-                             uint32_t row_num_after_page_0 = row_num_to_delete - ROWS_PER_PAGE_PAGE_0;
-                             page_num = 1 + (row_num_after_page_0 / ROWS_PER_PAGE_OTHER_PAGES);
-                         }
-                        table->pager->pages_dirty[page_num] = true;
-                        std::cout << "Row with ID " << delete_id << " deleted.\n";
-                    } else {
-                        std::cerr << "Error: Key found in search but failed to remove from B-tree.\n";
+            break;
+        }
+        case CommandType::DELETE: {
+            if (!session.current_table) {
+                response["error"] = "No table selected.";
+                return;
+            }
+            if (transaction_id != 0 && !txn_manager.acquireLock(transaction_id, session.current_table_name, LockType::EXCLUSIVE)) {
+                response["error"] = "Transaction " + std::to_string(transaction_id) + " waiting for exclusive lock.";
+                return;
+            }
+            std::string keyword, from_keyword, table_name, where_keyword, id_keyword, equals_sign;
+            int delete_id;
+            ss >> keyword >> from_keyword >> table_name >> where_keyword >> id_keyword >> equals_sign >> delete_id;
+            if (ss.fail() || keyword != "delete" || from_keyword != "from" || table_name != "table" ||
+                where_keyword != "where" || id_keyword != "id" || equals_sign != "=") {
+                response["error"] = "Syntax error. Usage: delete from table where id = <id>";
+                return;
+            }
+            uint32_t row_num_to_delete = session.current_table->btree->search(delete_id);
+            if (row_num_to_delete != std::numeric_limits<uint32_t>::max()) {
+                bool removed_from_btree = session.current_table->btree->remove(delete_id);
+                if (removed_from_btree) {
+                    void* row_slot = get_row_slot(session.current_table, row_num_to_delete);
+                    Row row;
+                    deserialize_row(row_slot, row);
+                    if (txn_manager.isInTransaction(transaction_id)) {
+                        txn_manager.logDelete(transaction_id, session.current_table_name, row_num_to_delete, row);
                     }
+                    row.is_deleted = true;
+                    serialize_row(row, row_slot);
+                    uint32_t page_num = (row_num_to_delete < ROWS_PER_PAGE_PAGE_0) ? 0 : 1 + ((row_num_to_delete - ROWS_PER_PAGE_PAGE_0) / ROWS_PER_PAGE_OTHER_PAGES);
+                    session.current_table->pager->pages_dirty[page_num] = true;
+                    response["message"] = "Row with ID " + std::to_string(delete_id) + " deleted.";
                 } else {
-                    std::cout << "Row with ID " << delete_id << " not found.\n";
+                    response["error"] = "Key found but failed to remove from B-tree.";
                 }
-                break;
+            } else {
+                response["message"] = "Row with ID " + std::to_string(delete_id) + " not found.";
             }
-            case CommandType::BTREE_CMD: {
-                // Print the structure of the B-tree
-                std::cout << "Printing B-tree structure:\n";
-                table->btree->printTree(table->btree->getRoot());
-                break;
+            break;
+        }
+        case CommandType::UPDATE: {
+            if (!session.current_table) {
+                response["error"] = "No table selected.";
+                return;
             }
-            case CommandType::CREATE_DB: {
-    std::stringstream ss(input);
-    std::string create_keyword, db_keyword, db_name;
-    ss >> create_keyword >> db_keyword >> db_name;
-    
-    if (ss.fail() || create_keyword != "create" || db_keyword != "database") {
-        std::cout << "Syntax error. Usage: create database <database_name>\n";
-        break;
-    }
-    
-    // Check for extra input
-    std::string remaining;
-    if (ss >> remaining) {
-        std::cout << "Syntax error: Extra input after database name.\n";
-        break;
-    }
-    
-    DatabaseCatalog catalog("master"); // Use a default catalog
-    if (catalog.createDatabase(db_name)) {
-        std::cout << "Database '" << db_name << "' created successfully.\n";
-    } else {
-        std::cout << "Failed to create database '" << db_name << "'.\n";
-    }
-    break;
-}
-case CommandType::USE_DB: {
-    std::stringstream ss(input);
-    std::string use_keyword, db_name;
-    ss >> use_keyword >> db_name;
-    
-    if (ss.fail() || use_keyword != "use") {
-        std::cout << "Syntax error. Usage: use <database_name>\n";
-        break;
-    }
-    
-    // Check for extra input
-    std::string remaining;
-    if (ss >> remaining) {
-        std::cout << "Syntax error: Extra input after database name.\n";
-        break;
-    }
-    
-    // Close current table before switching databases
-    db_close(table);
-    table = nullptr;
-    
-    DatabaseCatalog catalog("master");
-    if (catalog.useDatabase(db_name)) {
-        // We would typically reopen tables here or set the current database
-        std::cout << "Now using database '" << db_name << "'.\n";
-    } else {
-        // If database switch fails, reopen the default table
-        table = db_open("mydb.db");
-    }
-    break;
-    
-}
-case CommandType::CREATE_TABLE: {
-    std::stringstream ss(input);
-    std::string create_keyword, table_keyword, table_name;
-    ss >> create_keyword >> table_keyword >> table_name;
-    
-    if (ss.fail() || create_keyword != "create" || table_keyword != "table" || table_name.empty()) {
-        std::cout << "Syntax error. Usage: create table <table_name> (column1 datatype, column2 datatype, ...)\n";
-        break;
-    }
-    
-    // Parse column definitions: "create table students (id int, name varchar, email varchar)"
-    std::string columns_str;
-    std::getline(ss, columns_str); // Get the rest of the line for column definitions
-    
-    // Extract column definitions from between parentheses
-    size_t open_paren = columns_str.find('(');
-    size_t close_paren = columns_str.find_last_of(')');
-    
-    if (open_paren == std::string::npos || close_paren == std::string::npos || open_paren >= close_paren) {
-        std::cout << "Syntax error. Column definitions must be enclosed in parentheses.\n";
-        std::cout << "Usage: create table <table_name> (column1 datatype, column2 datatype, ...)\n";
-        break;
-    }
-    
-    // Extract the column definitions string
-    std::string columns_def = columns_str.substr(open_paren + 1, close_paren - open_paren - 1);
-    
-    // Parse individual column definitions (name:type pairs)
-    std::vector<std::pair<std::string, std::string>> column_definitions;
-    std::stringstream col_stream(columns_def);
-    std::string col_def;
-    
-    while (std::getline(col_stream, col_def, ',')) {
-        // Trim leading/trailing spaces
-        col_def.erase(0, col_def.find_first_not_of(" \t"));
-        col_def.erase(col_def.find_last_not_of(" \t") + 1);
-        
-        // Split by space to get column name and type
-        std::stringstream col_part_stream(col_def);
-        std::string col_name, col_type;
-        col_part_stream >> col_name >> col_type;
-        
-        if (col_name.empty() || col_type.empty()) {
-            std::cout << "Invalid column definition: '" << col_def << "'. Format should be 'name type'.\n";
+            if (transaction_id != 0 && !txn_manager.acquireLock(transaction_id, session.current_table_name, LockType::EXCLUSIVE)) {
+                response["error"] = "Transaction " + std::to_string(transaction_id) + " waiting for exclusive lock.";
+                return;
+            }
+            std::string keyword, table_keyword, set_keyword, name_keyword, name_equals, name_value,
+                        email_keyword, email_equals, email_value, where_keyword, id_keyword, id_equals;
+            int update_id;
+            ss >> keyword >> table_keyword >> set_keyword >> name_keyword >> name_equals >> name_value >>
+               email_keyword >> email_equals >> email_value >> where_keyword >> id_keyword >> id_equals >> update_id;
+            if (ss.fail() || keyword != "update" || table_keyword != "table" || set_keyword != "set" ||
+                name_keyword != "name" || name_equals != "=" || email_keyword != "email" || email_equals != "=" ||
+                where_keyword != "where" || id_keyword != "id" || id_equals != "=") {
+                response["error"] = "Syntax error. Usage: update table set name = <name>, email = <email> where id = <id>";
+                return;
+            }
+            if (name_value.length() >= COLUMN_NAME_SIZE || email_value.length() >= COLUMN_EMAIL_SIZE) {
+                response["error"] = "Name or email too long.";
+                return;
+            }
+            uint32_t row_num = session.current_table->btree->search(update_id);
+            if (row_num != std::numeric_limits<uint32_t>::max() && !is_row_freed(session.current_table, row_num)) {
+                Row old_row;
+                deserialize_row(get_row_slot(session.current_table, row_num), old_row);
+                if (txn_manager.isInTransaction(transaction_id)) {
+                    txn_manager.logUpdate(transaction_id, session.current_table_name, row_num, old_row);
+                }
+                if (update_row(session.current_table, update_id, name_value, email_value)) {
+                    response["message"] = "Row with ID " + std::to_string(update_id) + " updated.";
+                } else {
+                    response["error"] = "Row with ID " + std::to_string(update_id) + " not found or deleted.";
+                }
+            } else {
+                response["message"] = "Row with ID " + std::to_string(update_id) + " not found or deleted.";
+            }
             break;
         }
-        
-        // Convert to uppercase for consistency
-        std::transform(col_type.begin(), col_type.end(), col_type.begin(), ::toupper);
-        
-        // Validate column type
-        if (col_type != "INT" && col_type != "VARCHAR" && col_type != "FLOAT" && col_type != "TEXT") {
-            std::cout << "Unsupported data type: " << col_type << ". Supported types: INT, VARCHAR, FLOAT, TEXT\n";
+        case CommandType::BTREE_CMD: {
+            if (!session.current_table) {
+                response["error"] = "No table selected.";
+                return;
+            }
+            std::stringstream btree_stream;
+            btree_stream << "B-tree structure:\n";
+            session.current_table->btree->printTree(session.current_table->btree->getRoot());
+            response["message"] = btree_stream.str();
             break;
         }
-        
-        column_definitions.push_back({col_name, col_type});
-    }
-    
-    // Build the schema string for catalog (format: column_name:TYPE,...)
-    std::string schema;
-    for (size_t i = 0; i < column_definitions.size(); ++i) {
-        schema += column_definitions[i].first + ":" + column_definitions[i].second;
-        if (i < column_definitions.size() - 1) {
-            schema += ",";
-        }
-    }
-    
-    // Create the table file and add to catalog
-    DatabaseCatalog catalog("master");
-    std::string currentDB = currentDatabase;
-    
-    // 1. Create the directory for the database if it doesn't exist
-    std::string dbPath = "./databases/" + currentDB;
-//     bool success =create_directories(dbPath); // Creates all parent dirs if needed
-// if (!success) {
-//     std::cerr << "Failed to create directory: " << dbPath << std::endl;
-// }
-    // 2. Determine the table file path
-    std::string tablePath = dbPath + "/" + table_name + ".db";
-    
-    // 3. Add entry to catalog
-    if (catalog.createTable(currentDB, table_name, tablePath ,dbPath)) {
-        // 4. Create the physical fil   e for the table
-        std::ofstream tableFile(tablePath, std::ios::binary);
-        if (!tableFile) {
-            std::cout << "Error: Could not create table file at " << tablePath << "\n";
+        case CommandType::BEGIN_TRANSACTION: {
+            if (!session.current_table) {
+                response["error"] = "No table selected.";
+                return;
+            }
+            LockType lock_type = (transaction_id == 2) ? LockType::SHARED : LockType::EXCLUSIVE;
+            if (!txn_manager.beginTransaction(transaction_id, session.current_table, lock_type)) {
+                response["error"] = "Transaction " + std::to_string(transaction_id) + " waiting for " +
+                                   (lock_type == LockType::SHARED ? "shared" : "exclusive") + " lock on table '" + session.current_table_name + "'.";
+                return;
+            }
+            response["message"] = "Transaction " + std::to_string(transaction_id) + " started.";
             break;
         }
-        
-        // Initialize the table file with appropriate header
-        tableFile.close();
-        
-        std::cout << "Table '" << table_name << "' created successfully.\n";
-    } else {
-        std::cout << "Error creating table '" << table_name << "'.\n";
-    }
-    break;
-}
-case CommandType::ALTER_TABLE: {
-    std::stringstream ss(input);
-    std::string alter_keyword, table_keyword, table_name, rename_keyword, to_keyword, new_table_name;
-    ss >> alter_keyword >> table_keyword >> table_name >> rename_keyword >> to_keyword >> new_table_name;
-    
-    if (ss.fail() || alter_keyword != "alter" || table_keyword != "table" || 
-        rename_keyword != "rename" || to_keyword != "to") {
-        std::cout << "Syntax error. Usage: alter table <table_name> rename to <new_table_name>\n";
-        break;
-    }
-    
-    // Check for extra input
-    std::string remaining;
-    if (ss >> remaining) {
-        std::cout << "Syntax error: Extra input after new table name.\n";
-        break;
-    }
-    
-    DatabaseCatalog catalog("master"); // or use the current database
-    if (catalog.alterTableName(table_name, new_table_name)) {
-        std::cout << "Table renamed from '" << table_name << "' to '" << new_table_name << "' successfully.\n";
-    } else {
-        std::cout << "Failed to rename table from '" << table_name << "' to '" << new_table_name << "'.\n";
-    }
-    break;
-}
-
-
-// Inside main(), replace your SHOW_TABLES case with:
-case CommandType::SHOW_TABLES: {
-    std::stringstream ss(input);
-    std::string show_keyword, tables_keyword;
-    ss >> show_keyword >> tables_keyword;
-    
-    if (ss.fail() || show_keyword != "show" || tables_keyword != "tables") {
-        std::cout << "Syntax error. Usage: show tables\n";
-        break;
-    }
-    
-    // Check for extra input
-    std::string remaining;
-    if (ss >> remaining) {
-        std::cout << "Syntax error: Extra input after 'tables'.\n";
-        break;
-    }
-    
-    // Call the showTables function 
-    DatabaseCatalog catalog("master");
-    std::string currentDatabase  = catalog.getCurrentDatabase(); // You need this function
-    showTables( currentDatabase );
-
-    break;
-}
-
-// case CommandType::SHOW_TABLES: {
-//     std::stringstream ss(input);
-//     std::string show_keyword, tables_keyword;
-//     ss >> show_keyword >> tables_keyword;
-    
-//     if (ss.fail() || show_keyword != "show" || tables_keyword != "tables") {
-//         std::cout << "Syntax error. Usage: show tables\n";
-//         break;
-//     }
-    
-//     // Check for extra input
-//     std::string remaining;
-//     if (ss >> remaining) {
-//         std::cout << "Syntax error: Extra input after 'tables'.\n";
-//         break;
-//     }
-    
-//     DatabaseCatalog catalog("master"); // or use the current database
-//     std::vector<std::string> tables = catalog.listTables();
-    
-//     if (tables.empty()) {
-//         std::cout << "No tables found in the current database.\n";
-//     } else {
-//         std::cout << "Tables in the current database:\n";
-//         for (const auto& table_name : tables) {
-//             std::cout << "- " << table_name << "\n";
-//         }
-//     }
-//     break;
-// }
-case CommandType::DROP_TABLE: {
-    std::stringstream ss(input);
-    std::string drop_keyword, table_keyword, table_name;
-    ss >> drop_keyword >> table_keyword >> table_name;
-    
-    if (ss.fail() || drop_keyword != "drop" || table_keyword != "table") {
-        std::cout << "Syntax error. Usage: drop table <table_name>\n";
-        break;
-    }
-    
-    // Check for extra input
-    std::string remaining;
-    if (ss >> remaining) {
-        std::cout << "Syntax error: Extra input after table name.\n";
-        break;
-    }
-    
-    DatabaseCatalog catalog("master"); // or use the current database
-    
-    // If the table we're dropping is the current open table, close it first
-    if (table != nullptr && catalog.getTableName(table) == table_name) {
-        db_close(table);
-        table = nullptr;
-    }
-
-    if (catalog.dropTable(table_name)) {
-        std::cout << "Table '" << table_name << "' dropped successfully.\n";
-    } else {
-        std::cout << "Failed to drop table '" << table_name << "'.\n";
-    }
-
-    // If we closed our working table, reopen the default one
-    if (table == nullptr) {
-        table = db_open("mydb.db");
-    }
-    break;
-}
-   
-            case CommandType::UNKOWN:
-            default:
-                std::cout << "Unrecognized command: " << input << "\n";
-                break;
+        case CommandType::COMMIT: {
+            if (txn_manager.commit(transaction_id)) {
+                response["message"] = "Transaction " + std::to_string(transaction_id) + " committed successfully.";
+            } else {
+                response["error"] = "No active transaction " + std::to_string(transaction_id) + " to commit.";
+            }
+            break;
         }
+        case CommandType::ROLLBACK: {
+            if (!session.current_table) {
+                response["error"] = "No table selected for rollback.";
+                return;
+            }
+            if (txn_manager.rollback(transaction_id, session.current_table)) {
+                response["message"] = "Transaction " + std::to_string(transaction_id) + " rolled back successfully.";
+            } else {
+                response["error"] = "No active transaction " + std::to_string(transaction_id) + " to rollback.";
+            }
+            break;
+        }
+        default:
+            response["error"] = "Unrecognized command: " + command_input;
+            break;
     }
+}
+
+int main() {
+    DatabaseCatalog catalog("master");
+    TransactionManager txn_manager("master");
+
+    httplib::Server svr;
+// Serve static HTML and other assets
+svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
+    std::ifstream file("index.html"); // your HTML file name, adjust path if needed
+    if (file) {
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        res.set_content(buffer.str(), "text/html");
+    } else {
+        res.status = 404;
+        res.set_content("File not found", "text/plain");
+    }
+});
+
+    // Endpoint to create a new session
+   svr.Get("/api/create_session", [&](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json response;
+    static std::atomic<int> session_counter{0};
+    std::string new_session_id = "sess_" + std::to_string(session_counter++);
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex);
+        sessions[new_session_id] = Session{};
+    }
+    response["session_id"] = new_session_id;
+    res.set_content(response.dump(), "application/json");
+});
+
+
+    // Endpoint to select a table
+    svr.Post("/api/use_table", [&](const httplib::Request& req, httplib::Response& res) {
+        nlohmann::json response;
+        if (!req.has_param("session_id") || !req.has_param("table_name")) {
+            response["error"] = "Missing session_id or table_name parameter";
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+        std::string session_id = req.get_param_value("session_id");
+        std::string table_name = req.get_param_value("table_name");
+        uint32_t transaction_id = req.has_param("transaction_id") ? std::stoi(req.get_param_value("transaction_id")) : 0;
+
+        std::lock_guard<std::mutex> lock(sessions_mutex);
+        auto it = sessions.find(session_id);
+        if (it == sessions.end()) {
+            response["error"] = "Invalid session_id";
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+        Session& session = it->second;
+
+        if (txn_manager.isInTransaction(transaction_id)) {
+            response["error"] = "Cannot change table during an active transaction.";
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+        if (session.current_table) {
+            catalog.closeTable(session.current_table);
+            session.current_table = nullptr;
+            session.current_table_name.clear();
+        }
+        Table* table = catalog.openTable(table_name);
+        if (table) {
+            session.current_table = table;
+            session.current_table_name = table_name;
+            txn_manager.recover(table);
+            response["message"] = "Now using table '" + table_name + "' in database '" + session.current_db + "'.";
+        } else {
+            response["error"] = "Table '" + table_name + "' does not exist.";
+        }
+        res.set_content(response.dump(), "application/json");
+    });
+
+    // Endpoint to execute commands
+    svr.Post("/api/execute", [&](const httplib::Request& req, httplib::Response& res) {
+        nlohmann::json response;
+        if (!req.has_param("session_id")) {
+            response["error"] = "Missing session_id parameter";
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+        std::string session_id = req.get_param_value("session_id");
+        uint32_t transaction_id = req.has_param("transaction_id") ? std::stoi(req.get_param_value("transaction_id")) : 0;
+        std::string command = req.body;
+
+        std::lock_guard<std::mutex> lock(sessions_mutex);
+        auto it = sessions.find(session_id);
+        if (it == sessions.end()) {
+            response["error"] = "Invalid session_id";
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+        Session& session = it->second;
+
+        handleCommand(command, catalog, txn_manager, session, transaction_id, response);
+        res.set_content(response.dump(), "application/json");
+    });
+
+  // Cleanup endpoint
+svr.Get("/api/close_session", [&catalog](const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json response;
+    if (!req.has_param("session_id")) {
+        response["error"] = "Missing session_id parameter";
+        res.set_content(response.dump(), "application/json");
+        return;
+    }
+    std::string session_id = req.get_param_value("session_id");
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    auto it = sessions.find(session_id);
+    if (it != sessions.end()) {
+        if (it->second.current_table) {
+            catalog.closeTable(it->second.current_table);  // ✅ Now accessible
+        }
+        sessions.erase(it);
+        response["message"] = "Session closed.";
+    } else {
+        response["error"] = "Invalid session_id";
+    }
+    res.set_content(response.dump(), "application/json");
+});
+
+
+    // Start the server
+    std::cout << "Starting server on http://0.0.0.0:8080\n";
+    svr.listen("0.0.0.0", 8080);
+
+    // Cleanup
+    std::lock_guard<std::mutex> lock(sessions_mutex);
+    for (auto& it : sessions) {
+    std::string session_id = it.first;
+    Session& session = it.second;
+    if (session.current_table) {
+        catalog.closeTable(session.current_table);
+    }
+}
+
+    txn_manager.rollbackAllActiveTransactions();
     return 0;
 }

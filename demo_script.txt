@@ -1,0 +1,48 @@
+create database testdb 
+use testdb 
+create table users (id int, name varchar, email varchar)
+insert 1 Alice alice@example.com 
+insert 2 Bob bob@example.com 
+select 
+delete from table where id = 1 
+select 
+insert 3 Charlie charlie@example.com 
+update table set name = David, email = david@example.com where id = 2 
+select 
+insert 1 AliceNew alice.new@example.com 
+select 
+show tables 
+T1: begin transaction 
+T1: insert 4 Eve eve@example.com 
+select 
+T2: begin transaction 
+T2: select 
+T1: commit 
+T2: select 
+T2: commit 
+T1: begin transaction 
+T1: insert 5 Frank frank@example.com 
+select 
+T1: rollback 
+select 
+T3: begin transaction 
+T3: insert 6 Grace grace@example.com 
+T4: begin transaction 
+T4: insert 7 Heidi heidi@example.com 
+T3: update table set name = GraceNew, email = grace.new@example.com where id = 7 
+T4: update table set name = HeidiNew, email = heidi.new@example.com where id = 6 
+T3: commit 
+alter table users rename to people 
+use table people 
+select 
+drop table people 
+show tables 
+create table employees (id int, name varchar, email varchar) 
+use table employees 
+insert 1 John john@example.com 
+select 
+insert 1 Duplicate duplicate@example.com 
+select where id = 1 
+delete from table where id = 999 
+update table set name = Invalid, email = invalid@example.com where id = 999 
+.exit

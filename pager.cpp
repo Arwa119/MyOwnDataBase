@@ -20,6 +20,7 @@ Pager* pager_open(const std::string& filename) {
 
     fseek(db_file, 0, SEEK_END);
     uint32_t file_length = ftell(db_file);
+    std::cout << "Opening file: " << filename << ", length: " << file_length << " bytes\n";
 
     Pager* pager = new Pager();
     pager->file = db_file;
@@ -32,21 +33,19 @@ Pager* pager_open(const std::string& filename) {
 
     if (new_file || file_length < MIN_FILE_HEADER_SIZE) {
         void* page0 = std::malloc(PAGE_SIZE);
-         if (page0 == nullptr) {
-             std::cerr << "Error allocating memory for page 0\n";
-             exit(EXIT_FAILURE);
-         }
+        if (page0 == nullptr) {
+            std::cerr << "Error allocating memory for page 0\n";
+            exit(EXIT_FAILURE);
+        }
         std::memset(page0, 0, PAGE_SIZE);
+        uint32_t num_rows = 0;
+        std::memcpy((char*)page0 + NUM_ROWS_OFFSET, &num_rows, sizeof(num_rows));
 
         pager->pages[0] = page0;
         pager->pages_dirty[0] = true;
-
-        if (file_length < PAGE_SIZE) {
-             fseek(db_file, PAGE_SIZE - 1, SEEK_SET);
-             fputc('\0', db_file);
-             fflush(db_file);
-             pager->file_length = PAGE_SIZE;
-        }
+        pager_flush(pager, 0, PAGE_SIZE); // Ensure page 0 is written
+        pager->file_length = PAGE_SIZE;
+        //std::cout << "Initialized new file with page 0\n";
     }
 
     return pager;
@@ -61,32 +60,21 @@ void* get_page(Pager* pager, uint32_t page_num) {
     if (pager->pages[page_num] == nullptr) {
         void* page = std::malloc(PAGE_SIZE);
         if (page == nullptr) {
-             std::cerr << "Error allocating memory for page\n";
-             exit(EXIT_FAILURE);
+            std::cerr << "Error allocating memory for page\n";
+            exit(EXIT_FAILURE);
         }
+        std::memset(page, 0, PAGE_SIZE);
 
         uint32_t page_offset_in_file = page_num * PAGE_SIZE;
-
         if (page_offset_in_file < pager->file_length) {
-            uint32_t bytes_to_read = PAGE_SIZE;
-            if (page_offset_in_file + bytes_to_read > pager->file_length) {
-                bytes_to_read = pager->file_length - page_offset_in_file;
-            }
-
             fseek(pager->file, page_offset_in_file, SEEK_SET);
-            size_t bytes_read = fread(page, 1, bytes_to_read, pager->file);
-
-            if (bytes_read < PAGE_SIZE) {
-                std::memset((char*)page + bytes_read, 0, PAGE_SIZE - bytes_read);
+            size_t bytes_read = fread(page, 1, PAGE_SIZE, pager->file);
+            if (bytes_read < PAGE_SIZE && !feof(pager->file)) {
+                std::cerr << "Error reading page " << page_num << "\n";
+                exit(EXIT_FAILURE);
             }
-
-            if (bytes_read != bytes_to_read && !feof(pager->file)) {
-                 std::cerr << "Error reading file\n";
-                 exit(EXIT_FAILURE);
-            }
-
         } else {
-            std::memset(page, 0, PAGE_SIZE);
+            std::cout << "Initialized new page " << page_num << "\n";
         }
 
         pager->pages[page_num] = page;
@@ -101,7 +89,7 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
         std::cerr << "Tried to flush a null page\n";
         return;
     }
-     if (page_num >= TABLE_MAX_PAGES) {
+    if (page_num >= TABLE_MAX_PAGES) {
         std::cerr << "Tried to flush page number out of bounds: " << page_num << "\n";
         exit(EXIT_FAILURE);
     }
@@ -112,8 +100,10 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
     fseek(pager->file, page_num * PAGE_SIZE, SEEK_SET);
     size_t bytes_written = fwrite(pager->pages[page_num], 1, size, pager->file);
     if (bytes_written != size) {
-         std::cerr << "Error writing to file\n";
-         exit(EXIT_FAILURE);
+        std::cerr << "Error writing page " << page_num << "\n";
+        exit(EXIT_FAILURE);
     }
+    fflush(pager->file);
     pager->pages_dirty[page_num] = false;
+    //std::cout << "Flushed page " << page_num << ", bytes written: " << bytes_written << "\n";
 }

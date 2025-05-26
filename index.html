@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Terminal</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: #000;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .terminal {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        .header {
+            border-bottom: 1px solid #00ff00;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+
+        .title {
+            font-size: 24px;
+            text-align: center;
+            margin-bottom: 10px;
+            text-shadow: 0 0 10px #00ff00;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            font-size: 14px;
+            opacity: 0.8;
+        }
+
+        .status-item {
+            padding: 2px 8px;
+            border: 1px solid #004400;
+            border-radius: 3px;
+            background-color: #001100;
+        }
+
+        .output {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 10px;
+            line-height: 1.4;
+            font-size: 14px;
+        }
+
+        .output::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .output::-webkit-scrollbar-track {
+            background: #111;
+        }
+
+        .output::-webkit-scrollbar-thumb {
+            background: #00ff00;
+            border-radius: 4px;
+        }
+
+        .line {
+            margin-bottom: 5px;
+            word-wrap: break-word;
+        }
+
+        .prompt {
+            color: #00ff00;
+            font-weight: bold;
+        }
+
+        .command {
+            color: #ffffff;
+        }
+
+        .response {
+            color: #00dd00;
+            margin-left: 20px;
+            white-space: pre-wrap;
+        }
+
+        .error {
+            color: #ff4444;
+            margin-left: 20px;
+        }
+
+        .success {
+            color: #44ff44;
+            margin-left: 20px;
+        }
+
+        .warning {
+            color: #ffaa00;
+            margin-left: 20px;
+        }
+
+        .input-section {
+            border-top: 1px solid #00ff00;
+            padding-top: 15px;
+            display: flex;
+            align-items: center;
+        }
+
+        .input-prompt {
+            color: #00ff00;
+            margin-right: 10px;
+            font-weight: bold;
+            min-width: 100px;
+        }
+
+        .command-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            outline: none;
+        }
+
+        .command-input::placeholder {
+            color: #666;
+        }
+
+        .table-display {
+            margin: 10px 0;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .table-display th,
+        .table-display td {
+            border: 1px solid #00aa00;
+            padding: 6px 10px;
+            text-align: left;
+            background-color: #000;
+        }
+
+        .table-display th {
+            background-color: #003300;
+            font-weight: bold;
+            color: #00ff00;
+        }
+
+        .table-display td {
+            color: #00dd00;
+        }
+
+        .blink {
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        .help-text {
+            color: #666;
+            font-size: 11px;
+            margin-top: 5px;
+            padding: 5px;
+            border-top: 1px solid #333;
+        }
+
+        .transaction-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .txn-button {
+            background: #003300;
+            color: #00ff00;
+            border: 1px solid #00aa00;
+            padding: 4px 8px;
+            cursor: pointer;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .txn-button:hover {
+            background: #005500;
+        }
+
+        .txn-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .connecting {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.5; }
+            50% { opacity: 1; }
+            100% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="terminal">
+        <div class="header">
+            <div class="title">◉ C++ Database Management System v1.0 ◉</div>
+            <div class="status-bar">
+                <div class="status-item">Session: <span id="sessionStatus">Connecting...</span></div>
+                <div class="status-item">Database: <span id="currentDB">master</span></div>
+                <div class="status-item">Table: <span id="currentTable">none</span></div>
+                <div class="status-item">Transaction: <span id="transactionStatus">none</span></div>
+            </div>
+            <div class="transaction-controls">
+                <input type="number" id="txnIdInput" placeholder="TXN ID" min="1" max="10" style="width: 80px; background: #001100; color: #00ff00; border: 1px solid #00aa00; padding: 2px 4px; font-family: 'Courier New', monospace;">
+                <button class="txn-button" onclick="beginTransaction()">BEGIN</button>
+                <button class="txn-button" onclick="commitTransaction()">COMMIT</button>
+                <button class="txn-button" onclick="rollbackTransaction()">ROLLBACK</button>
+            </div>
+        </div>
+
+        <div class="output" id="output">
+            <div class="line">
+                <span class="success">╔══════════════════════════════════════════════════════════════╗</span>
+            </div>
+            <div class="line">
+                <span class="success">║          Welcome to C++ Database Management System          ║</span>
+            </div>
+            <div class="line">
+                <span class="success">╚══════════════════════════════════════════════════════════════╝</span>
+            </div>
+            <div class="line">
+                <span class="response">Initializing connection to database server...</span>
+            </div>
+        </div>
+
+        <div class="input-section">
+            <span class="input-prompt" id="promptText">master></span>
+            <input type="text" class="command-input" id="commandInput" placeholder="Enter SQL command (try 'help' for available commands)" autofocus>
+        </div>
+        <div class="help-text">
+            <strong>Database Commands:</strong> create/drop/use database | <strong>Table Commands:</strong> create/drop/alter/show tables | <strong>Data Commands:</strong> insert/select/update/delete | <strong>Transaction Commands:</strong> begin/commit/rollback | <strong>Other:</strong> btree, help, clear
+        </div>
+    </div>
+
+    <script>
+        let sessionId = null;
+        let currentDB = 'master';
+        let currentTable = 'none';
+        let currentTransactionId = null;
+        const output = document.getElementById('output');
+        const commandInput = document.getElementById('commandInput');
+        const promptText = document.getElementById('promptText');
+        const SERVER_URL = ' https://91ae-111-68-102-25.ngrok-free.app';
+
+        // Initialize session on load
+        window.onload = async () => {
+            await createSession();
+        };
+
+        // Create session
+        async function createSession() {
+            try {
+                updateStatus('sessionStatus', 'Connecting...', 'connecting');
+                const response = await fetch(`${SERVER_URL}/api/create_session`);
+                const result = await response.json();
+                sessionId = result.session_id;
+                updateStatus('sessionStatus', 'Connected');
+                addLine('success', `✓ Session established: ${sessionId}`);
+                addLine('response', 'Database server ready. Type your commands below.');
+                updatePrompt();
+            } catch (error) {
+                addLine('error', `✗ Failed to connect to database server: ${error.message}`);
+                addLine('warning', 'Make sure your C++ server is running on localhost:8080');
+                updateStatus('sessionStatus', 'Disconnected');
+            }
+        }
+
+        // Handle Enter key
+        commandInput.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                const command = commandInput.value.trim();
+                if (command) {
+                    await executeCommand(command);
+                    commandInput.value = '';
+                }
+            }
+        });
+
+        // Add line to output
+        function addLine(type, text, isCommand = false) {
+            const line = document.createElement('div');
+            line.className = 'line';
+            
+            if (isCommand) {
+                line.innerHTML = `<span class="prompt">${promptText.textContent}</span> <span class="command">${escapeHtml(text)}</span>`;
+            } else {
+                line.innerHTML = `<span class="${type}">${escapeHtml(text)}</span>`;
+            }
+            
+            output.appendChild(line);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Update status bar
+        function updateStatus(elementId, value, className = '') {
+            const element = document.getElementById(elementId);
+            element.textContent = value;
+            element.className = className;
+        }
+
+        // Update prompt based on current state
+        function updatePrompt() {
+            let prompt = currentDB;
+            if (currentTable !== 'none') {
+                prompt += `/${currentTable}`;
+            }
+            if (currentTransactionId) {
+                prompt += `[txn:${currentTransactionId}]`;
+            }
+            prompt += '>';
+            promptText.textContent = prompt;
+        }
+
+        // Execute command
+        async function executeCommand(command) {
+            addLine('', command, true);
+
+            if (!sessionId) {
+                addLine('error', 'No active session. Please refresh the page.');
+                return;
+            }
+
+            // Handle local commands
+            const lowerCommand = command.toLowerCase().trim();
+            
+            if (lowerCommand === 'help') {
+                showHelp();
+                return;
+            }
+            
+            if (lowerCommand === 'clear') {
+                output.innerHTML = '';
+                addLine('success', 'Terminal cleared.');
+                return;
+            }
+
+            // Handle transaction ID from command or input field
+            let transactionId = 0;
+            const txnInput = document.getElementById('txnIdInput');
+            if (txnInput.value && parseInt(txnInput.value) > 0) {
+                transactionId = parseInt(txnInput.value);
+            }
+
+            try {
+                // Build request parameters
+                const params = new URLSearchParams();
+                params.append('session_id', sessionId);
+                if (transactionId > 0) {
+                    params.append('transaction_id', transactionId.toString());
+                }
+
+                const response = await fetch(`${SERVER_URL}/api/execute?${params.toString()}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: command
+                });
+
+                const result = await response.json();
+                handleResponse(result, command);
+
+            } catch (error) {
+                addLine('error', `Connection error: ${error.message}`);
+                addLine('warning', 'Check if the database server is running.');
+            }
+        }
+
+        // Handle server response
+        function handleResponse(result, originalCommand) {
+            if (result.error) {
+                addLine('error', `✗ ${result.error}`);
+            } else if (result.message) {
+                addLine('success', `✓ ${result.message}`);
+                
+                // Update session state based on command
+                updateSessionState(result, originalCommand);
+                
+                // Handle special response types
+                if (result.tables) {
+                    displayTables(result.tables);
+                } else if (result.rows) {
+                    displayRows(result.rows);
+                } else if (result.row) {
+                    displaySingleRow(result.row);
+                }
+            }
+        }
+
+        // Update session state
+        function updateSessionState(result, command) {
+            const lowerCommand = command.toLowerCase().trim();
+            
+            // Database changes
+            if (lowerCommand.startsWith('use ') && result.message.includes('Now using database')) {
+                const dbName = command.split(' ')[1];
+                currentDB = dbName;
+                updateStatus('currentDB', dbName);
+                currentTable = 'none';
+                updateStatus('currentTable', 'none');
+            }
+            
+            // Table changes
+            if (lowerCommand.startsWith('create table') && result.message.includes('created and opened')) {
+                const tableName = command.split(' ')[2];
+                currentTable = tableName;
+                updateStatus('currentTable', tableName);
+            }
+            
+            // Transaction state changes
+            if (lowerCommand.startsWith('begin') || result.message.includes('started')) {
+                const txnInput = document.getElementById('txnIdInput');
+                if (txnInput.value) {
+                    currentTransactionId = parseInt(txnInput.value);
+                    updateStatus('transactionStatus', `active:${currentTransactionId}`);
+                }
+            }
+            
+            if (lowerCommand === 'commit' || lowerCommand === 'rollback' || 
+                result.message.includes('committed') || result.message.includes('rolled back')) {
+                currentTransactionId = null;
+                updateStatus('transactionStatus', 'none');
+            }
+            
+            updatePrompt();
+        }
+
+        // Display tables
+        function displayTables(tables) {
+            if (tables.length === 0) {
+                addLine('response', 'No tables found.');
+                return;
+            }
+            
+            const table = document.createElement('table');
+            table.className = 'table-display';
+            
+            // Header
+            const headerRow = table.insertRow();
+            const th = document.createElement('th');
+            th.textContent = 'Table Name';
+            headerRow.appendChild(th);
+            
+            // Rows
+            tables.forEach(tableName => {
+                const row = table.insertRow();
+                const cell = row.insertCell();
+                cell.textContent = tableName;
+            });
+            
+            output.appendChild(table);
+        }
+
+        // Display multiple rows
+        function displayRows(rows) {
+            if (rows.length === 0) {
+                addLine('response', 'No rows found.');
+                return;
+            }
+            
+            const table = document.createElement('table');
+            table.className = 'table-display';
+            
+            // Header
+            const headerRow = table.insertRow();
+            ['ID', 'Name', 'Email'].forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                headerRow.appendChild(th);
+            });
+            
+            // Rows
+            rows.forEach(row => {
+                const tr = table.insertRow();
+                tr.insertCell().textContent = row.id;
+                tr.insertCell().textContent = row.name;
+                tr.insertCell().textContent = row.email;
+            });
+            
+            output.appendChild(table);
+            addLine('response', `Displayed ${rows.length} row(s).`);
+        }
+
+        // Display single row
+        function displaySingleRow(row) {
+            const table = document.createElement('table');
+            table.className = 'table-display';
+            
+            // Header
+            const headerRow = table.insertRow();
+            ['ID', 'Name', 'Email'].forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                headerRow.appendChild(th);
+            });
+            
+            // Row
+            const tr = table.insertRow();
+            tr.insertCell().textContent = row.id;
+            tr.insertCell().textContent = row.name;
+            tr.insertCell().textContent = row.email;
+            
+            output.appendChild(table);
+        }
+
+        // Transaction functions
+        async function beginTransaction() {
+            const txnId = document.getElementById('txnIdInput').value;
+            if (!txnId || txnId < 1) {
+                addLine('error', 'Please enter a valid transaction ID (1-10)');
+                return;
+            }
+            await executeCommand(`begin ${txnId}`);
+        }
+
+        async function commitTransaction() {
+            await executeCommand('commit');
+        }
+
+        async function rollbackTransaction() {
+            await executeCommand('rollback');
+        }
+
+        // Use table function (for compatibility)
+        async function useTable(tableName) {
+            if (!sessionId) {
+                addLine('error', 'No active session.');
+                return;
+            }
+
+            try {
+                const params = new URLSearchParams();
+                params.append('session_id', sessionId);
+                params.append('table_name', tableName);
+
+                const response = await fetch(`${SERVER_URL}/api/use_table?${params.toString()}`, {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.error) {
+                    addLine('error', `✗ ${result.error}`);
+                } else {
+                    addLine('success', `✓ ${result.message}`);
+                    currentTable = tableName;
+                    updateStatus('currentTable', tableName);
+                    updatePrompt();
+                }
+            } catch (error) {
+                addLine('error', `Connection error: ${error.message}`);
+            }
+        }
+
+        // Show help
+        function showHelp() {
+            addLine('success', '╔══════════════════════════════════════════════════════════════╗');
+            addLine('success', '║                    AVAILABLE COMMANDS                       ║');
+            addLine('success', '╠══════════════════════════════════════════════════════════════╣');
+            addLine('response', '║ DATABASE MANAGEMENT:                                         ║');
+            addLine('response', '║   create database <name>     - Create a new database        ║');
+            addLine('response', '║   drop database <name>       - Delete a database            ║');
+            addLine('response', '║   use <database>             - Switch to database           ║');
+            addLine('response', '║                                                              ║');
+            addLine('response', '║ TABLE MANAGEMENT:                                            ║');
+            addLine('response', '║   create table <name> (id int, name varchar, email varchar) ║');
+            addLine('response', '║   drop table <name>          - Delete a table               ║');
+            addLine('response', '║   alter table <old> rename to <new> - Rename table          ║');
+            addLine('response', '║   show tables                - List all tables              ║');
+            addLine('response', '║                                                              ║');
+            addLine('response', '║ DATA OPERATIONS:                                             ║');
+            addLine('response', '║   insert <id> <name> <email> - Insert new record            ║');
+            addLine('response', '║   select                     - Show all records             ║');
+            addLine('response', '║   select where id = <id>     - Find specific record        ║');
+            addLine('response', '║   update table set name = <name>, email = <email> where id = <id> ║');
+            addLine('response', '║   delete from table where id = <id> - Delete record        ║');
+            addLine('response', '║                                                              ║');
+            addLine('response', '║ TRANSACTIONS:                                                ║');
+            addLine('response', '║   begin <txn_id>             - Start transaction            ║');
+            addLine('response', '║   commit                     - Commit transaction           ║');
+            addLine('response', '║   rollback                   - Rollback transaction         ║');
+            addLine('response', '║                                                              ║');
+            addLine('response', '║ OTHER:                                                       ║');
+            addLine('response', '║   btree                      - Show B-tree structure        ║');
+            addLine('response', '║   clear                      - Clear terminal               ║');
+            addLine('response', '║   help                       - Show this help               ║');
+            addLine('success', '╚══════════════════════════════════════════════════════════════╝');
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', async () => {
+            if (sessionId) {
+                try {
+                    await fetch(`${SERVER_URL}/api/close_session?session_id=${sessionId}`);
+                } catch (error) {
+                    console.log('Failed to close session:', error);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
